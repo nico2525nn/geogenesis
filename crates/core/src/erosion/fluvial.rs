@@ -154,6 +154,7 @@ impl ErosionProcess for FluvialErosion {
     fn apply(&self, heightmap: &mut HeightMap, dt: f64) {
         let flow = self.compute_flow_accumulation(heightmap);
         let w = heightmap.width;
+        let max_erosion_per_step = heightmap.max().max(1000.0) * 0.1;
 
         for y in 0..heightmap.height {
             for x in 0..heightmap.width {
@@ -166,9 +167,16 @@ impl ErosionProcess for FluvialErosion {
                 let n = self.config.channel_slope_index;
                 let erosion = self.config.kf * area.powf(m) * slope.powf(n) * dt;
 
-                let new_h = heightmap.data[idx] - erosion;
-                if new_h > -10000.0 {
-                    heightmap.data[idx] = new_h;
+                // 数値安定性ガード
+                let erosion = if erosion.is_finite() && erosion >= 0.0 {
+                    erosion.min(max_erosion_per_step)
+                } else {
+                    0.0
+                };
+
+                heightmap.data[idx] -= erosion;
+                if heightmap.data[idx] < -10000.0 {
+                    heightmap.data[idx] = -10000.0;
                 }
             }
         }

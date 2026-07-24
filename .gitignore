@@ -29,6 +29,8 @@ pkg/
 # Logs
 *.log
 npm-debug.log*
+bun.lock
+bun.lockb
 
 # Generated
 *.generated.*

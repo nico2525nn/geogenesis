@@ -10,6 +10,9 @@ export default defineConfig({
   build: {
     target: 'es2020',
     outDir: 'dist',
+    rollupOptions: {
+      external: ['geogenesis-wasm'],
+    },
   },
   optimizeDeps: {
     exclude: ['geogenesis-wasm'],

@@ -41,33 +41,42 @@ impl ErosionProcess for HillslopeProcess {
         let h = heightmap.height;
         let critical_slope = self.config.critical_slope_deg.to_radians().tan();
         let mut new_data = heightmap.data.clone();
+        let max_change = heightmap.max().max(1000.0).abs() * 0.2;
 
         for y in 1..h - 1 {
             for x in 1..w - 1 {
                 let idx = y * w + x;
-                let slope = heightmap.slope(x, y);
+                let h_center = heightmap.data[idx];
+                if !h_center.is_finite() { continue; }
 
-                // 土壌クリープ（拡散）
-                let laplacian =
-                    heightmap.data[(y - 1) * w + x] +
-                    heightmap.data[(y + 1) * w + x] +
-                    heightmap.data[y * w + (x - 1)] +
-                    heightmap.data[y * w + (x + 1)] -
-                    4.0 * heightmap.data[idx];
+                let h_up = heightmap.data[(y - 1) * w + x];
+                let h_down = heightmap.data[(y + 1) * w + x];
+                let h_left = heightmap.data[y * w + (x - 1)];
+                let h_right = heightmap.data[y * w + (x + 1)];
 
+                if !(h_up.is_finite() && h_down.is_finite() && h_left.is_finite() && h_right.is_finite()) {
+                    continue;
+                }
+
+                let laplacian = h_up + h_down + h_left + h_right - 4.0 * h_center;
                 let creep = self.config.diffusion_coef * laplacian * dt;
+                let creep = creep.clamp(-max_change, max_change);
                 new_data[idx] += creep;
 
-                // 崩壊（臨界傾斜角超過）
-                if slope > critical_slope {
-                    let excess = (slope - critical_slope) * 0.1;
-                    new_data[idx] -= excess * dt;
-                    // 崩壊土砂を下方へ移動（簡易）
-                    if y + 1 < h {
-                        new_data[(y + 1) * w + x] += excess * dt * 0.5;
+                let slope = heightmap.slope(x, y);
+                if slope.is_finite() && slope > critical_slope {
+                    let excess = ((slope - critical_slope) * 0.1 * dt).min(max_change);
+                    new_data[idx] -= excess;
+                    if y + 1 < h && new_data[(y + 1) * w + x].is_finite() {
+                        new_data[(y + 1) * w + x] += excess * 0.5;
                     }
                 }
             }
+        }
+
+        for v in &mut new_data {
+            if !v.is_finite() { *v = 0.0; }
+            if *v < -10000.0 { *v = -10000.0; }
         }
 
         heightmap.data = new_data;
