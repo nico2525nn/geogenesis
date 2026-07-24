@@ -20,9 +20,10 @@ export interface EngineHandle {
  * WASM エンジンを非同期に初期化
  */
 export async function createEngine(): Promise<EngineHandle> {
-  // wasm ロードを試行、フォールバックとして JS 実装を使用
   try {
-    const module = await import('geogenesis-wasm');
+    // Vite に静的に解決されないよう変数経由の動的インポート
+    const wasmId = 'geogenesis-wasm';
+    const module = await import(wasmId);
     const engine = new module.GeoGenesisEngine();
 
     return {
