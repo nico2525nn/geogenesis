@@ -8,9 +8,14 @@
  */
 
 import type { ParamValues, WorkerRequest, WorkerResponse } from "./types";
+// Vite treats ?url imports as asset URLs and serves the real bytes (with the
+// wasm MIME type) in both dev and build. A relative fetch against the worker
+// URL instead falls through to index.html in dev.
+import engineUrl from "./engine.wasm?url";
 
 interface WasmExports extends WebAssembly.Exports {
   memory: WebAssembly.Memory;
+  gg_alloc(size: number): number;
   gg_create(ptr: number, len: number): number;
   gg_generate_initial(): number;
   gg_step(steps: number): number;
@@ -32,10 +37,7 @@ let loadError: string | null = null;
 async function load(): Promise<void> {
   if (wasm !== null || loadError !== null) return;
   try {
-    // The build copies the wasm binary next to the bundle as engine.wasm.
-    // `new URL(..., import.meta.url)` keeps working under Vite dev and build.
-    const url = new URL("./engine.wasm", import.meta.url);
-    const response = await fetch(url);
+    const response = await fetch(engineUrl);
     if (!response.ok) {
       throw new Error(`engine.wasm: HTTP ${response.status}`);
     }
@@ -63,15 +65,11 @@ function readJsonParams(params: ParamValues): { ptr: number; len: number } {
   return { ptr, len: bytes.length };
 }
 
-/** Bump allocator: the module has no malloc, so carve input space from a cursor. */
-let heapCursor = 1024 * 1024;
-
 function malloc(size: number): number {
-  const w = requireWasm();
-  const pagesNeeded = Math.ceil((heapCursor + size - w.memory.buffer.byteLength) / 65536);
-  if (pagesNeeded > 0) w.memory.grow(pagesNeeded);
-  const ptr = heapCursor;
-  heapCursor += size + 15 - ((size + 15) % 16);
+  // Engine-owned allocation: a JS-side bump cursor cannot know where the
+  // Rust allocator's heap starts and would corrupt live simulation state.
+  const ptr = requireWasm().gg_alloc(size);
+  if (ptr === 0) throw new Error(`engine out of memory allocating ${size} bytes`);
   return ptr;
 }
 
@@ -80,15 +78,20 @@ function readBuffer(ptr: number, byteLen: number): Uint8Array {
   return new Uint8Array(w.memory.buffer.slice(ptr, ptr + byteLen));
 }
 
+/** Reads the u32 length slot with a fresh view (malloc may grow memory). */
+function readLen(lenPtr: number): number {
+  const w = requireWasm();
+  return new DataView(w.memory.buffer).getUint32(lenPtr, true);
+}
+
 function lastError(): string {
   try {
     const w = requireWasm();
     const lenPtr = malloc(8);
     new BigUint64Array(w.memory.buffer)[lenPtr / 8] = 0n;
     // gg_last_error writes through a usize out-pointer (4 bytes on wasm32).
-    const view = new DataView(w.memory.buffer);
     const ptr = w.gg_last_error(lenPtr);
-    const len = view.getUint32(lenPtr, true);
+    const len = readLen(lenPtr);
     const msg = new TextDecoder().decode(readBuffer(ptr, len));
     w.gg_free(ptr, len);
     return msg || "unknown engine error";
@@ -142,9 +145,8 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       }
       case "elevation": {
         const lenPtr = malloc(8);
-        const view = new DataView(w.memory.buffer);
         const ptr = w.gg_elevation_ptr(lenPtr);
-        const byteLen = view.getUint32(lenPtr, true);
+        const byteLen = readLen(lenPtr);
         const width = w.gg_width();
         const height = w.gg_height();
         const seaLevel = w.gg_sea_level_m();
@@ -155,9 +157,8 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       }
       case "stats": {
         const lenPtr = malloc(8);
-        const view = new DataView(w.memory.buffer);
         const ptr = w.gg_stats_ptr(lenPtr);
-        const byteLen = view.getUint32(lenPtr, true);
+        const byteLen = readLen(lenPtr);
         const stats = JSON.parse(new TextDecoder().decode(readBuffer(ptr, byteLen)));
         w.gg_free(ptr, byteLen);
         post({ id: request.id, kind: "stats", stats });

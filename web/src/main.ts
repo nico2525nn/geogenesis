@@ -100,8 +100,16 @@ async function refreshTerrain(): Promise<void> {
   current = { width: elevation.width, height: elevation.height, elevation: elevation.data, seaLevel: elevation.seaLevel, biomes };
   view.show(current);
   drawProfile();
-  const stats = (await callSimple("stats")) as Extract<WorkerResponse, { kind: "stats" } | { kind: "error" }>;
-  if (stats.kind === "stats") renderStats(statsBox, stats.stats as EngineStats);
+  setStatus("terrain received, fetching stats…");
+  try {
+    const stats = (await callSimple("stats")) as Extract<WorkerResponse, { kind: "stats" } | { kind: "error" }>;
+    if (stats.kind === "stats") {
+      renderStats(statsBox, stats.stats as EngineStats);
+      setStatus(`stats ok (${stats.stats.cells} cells)`);
+    } else setStatus(`stats failed: ${stats.message}`);
+  } catch (err) {
+    setStatus(`stats failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 function viewMode(): ColorMode {
@@ -204,10 +212,8 @@ async function generate(): Promise<void> {
       setStatus(`failed: ${response.result.error ?? "unknown"}`);
       return;
     }
-    setStatus(`world ${response.result.width}×${response.result.height} — eroding…`);
+    setStatus(`world ${response.result.width}×${response.result.height} — fetching…`);
     await refreshTerrain();
-    const elapsed = current !== null ? "" : "";
-    setStatus(`done (${response.result.width}×${response.result.height})${elapsed}`);
   } finally {
     setBusy(false);
   }

@@ -173,18 +173,23 @@ pub fn tectonic_uplift(
             let kind = mosaic.boundary_type_at(x, y);
 
             // Signed rate in m/yr; saturating so fast collisions stay bounded.
+            // Coefficients are m/yr: ~2 mm/yr of orogenic growth at full
+            // convergence is the observed order (Himalaya ~5, Andes ~1). The
+            // old values (0.4, 0.3) were 200x too large and drowned all
+            // other relief: one convergent cell reached 1.6M m and the final
+            // rescale crushed everything else into a 20 m band.
             let rate = match kind {
                 BoundaryType::Convergent => {
                     let t = clamp(conv / reference, 0.0, 4.0);
-                    mean_rate.metres_per_year() + 0.4 * t
+                    mean_rate.metres_per_year() + 0.002 * t
                 }
                 BoundaryType::Divergent => {
                     let t = clamp(-conv / reference, 0.0, 4.0);
-                    mean_rate.metres_per_year() - 0.3 * t
+                    mean_rate.metres_per_year() - 0.0015 * t
                 }
                 BoundaryType::Transform => {
                     let slip = mosaic.transform_rate.get(x, y) / reference;
-                    mean_rate.metres_per_year() - 0.05 * slip.clamp(0.0, 4.0)
+                    mean_rate.metres_per_year() - 0.0002 * slip.clamp(0.0, 4.0)
                 }
                 BoundaryType::Null => mean_rate.metres_per_year(),
             };
@@ -192,6 +197,13 @@ pub fn tectonic_uplift(
             out.set(x, y, rate * years);
         }
     }
+    // Detrend: only relief *relative* to the plate mean builds topography.
+    // A uniform +1 mm/yr over 1 Myr is +1000 m of datum shift, not a mountain;
+    // without this the whole world sits kilometres above (or below, for
+    // negative means) the vertical range and rescale burns the range on the
+    // offset instead of the relief.
+    let mean = out.mean();
+    out.map_in_place(|_, v| v - mean);
     out
 }
 
@@ -367,6 +379,11 @@ pub fn hotspot_uplift(
             );
         }
     }
+    // Domes are positive-only: without detrending, five 2000 m domes add a
+    // one-sided offset that the final rescale spends range on. The domes keep
+    // their shape; only the datum is removed.
+    let mean = out.mean();
+    out.map_in_place(|_, v| v - mean);
     out
 }
 
@@ -428,6 +445,10 @@ pub fn convection_noise(
     let mut out = ScalarField::zeros(b);
     let amplitude = UpliftRate::from_mm_per_year(params.mean_rate_mm_yr).total_uplift(years);
     field.add_into(&mut out, cycles, amplitude);
+    // Same datum argument as tectonic_uplift: only the variation builds
+    // relief, so remove the mean before returning.
+    let mean = out.mean();
+    out.map_in_place(|_, v| v - mean);
     out
 }
 
@@ -565,6 +586,23 @@ mod tests {
         let bound = params.vertical_scale_m * 100.0;
         assert!(up.total.max() <= bound, "uplift exceeded bound");
         assert!(up.total.min() >= -bound);
+    }
+
+    #[test]
+    fn tectonic_uplift_is_zero_mean() {
+        // Datum shifts are not topography: a uniform +1 mm/yr must not move
+        // the world mean. Without detrending, 1 Myr at 1 mm/yr puts the whole
+        // grid +1000 m up and the final rescale spends the vertical range on
+        // the offset, crushing real relief into a flat band.
+        let b = rect(32, 32);
+        let m = build_mosaic(b, &PlateParams::default(), 7, 1e7);
+        let t = tectonic_uplift(&m, &UpliftParams::default(), 1e6);
+        assert!(
+            t.mean().abs() < 1e-6,
+            "tectonic uplift has datum offset {}",
+            t.mean()
+        );
+        assert!(t.max() - t.min() > 100.0, "no relief survived detrending");
     }
 
     #[test]

@@ -62,9 +62,15 @@ pub fn generate_initial(params: &Params) -> Result<PipelineOutput, crate::GeoErr
     // 5. Fault offsets at plate boundaries.
     apply_faults(&mut relief, &mosaic, &p);
 
-    // 6. Combine: base + tectonic relief, then named stamps.
-    relief.zip_with(&uplift.total, |n, u| {
-        n * p.world.vertical_m * 0.45 + u * 0.55
+    // 6. Combine: base + tectonic relief, then named stamps. Both terms span
+    // [-1, 1] — the base noise natively, the uplift via normalized_relief —
+    // so equal weights preserve fractal detail and plate structure alike.
+    // Combining raw metres against unit noise let a ±2000 m uplift field
+    // swamp the ±1 noise and drown every world (land 2%).
+    let mut tectonic_norm = uplift.total.clone();
+    tectonic_norm.rescale(-1.0, 1.0);
+    relief.zip_with(&tectonic_norm, |n, u| {
+        (n + u) * p.world.vertical_m * 0.5
     });
     apply_stamps(&mut relief, &mosaic, &p, seed);
 

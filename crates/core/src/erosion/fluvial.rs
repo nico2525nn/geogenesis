@@ -12,7 +12,7 @@
 //! exported off the domain. [`MassBalance`] closes the account.
 
 use crate::erosion::{repair_field, MassBalance};
-use crate::grid::ScalarField;
+use crate::grid::{Boundary, ScalarField};
 use crate::hydrology::{condition_d8, condition_mfd};
 
 /// The sediment discharge law, per spec §3b's table.
@@ -116,7 +116,8 @@ pub fn build_state_with_order(
             Some(o) => o.to_vec(),
             None => crate::hydrology::accumulation_order(&filled),
         };
-        let acc_m2 = scale_area(acc, cell_size_m, runoff_mm_yr);
+        let b = *surface.boundary();
+        let acc_m2 = scale_area(&acc, &order, &routing, b, cell_size_m, runoff_mm_yr);
         (filled, routing, order, acc_m2)
     } else {
         let (filled, routing, acc) =
@@ -125,7 +126,8 @@ pub fn build_state_with_order(
             Some(o) => o.to_vec(),
             None => crate::hydrology::accumulation_order(&filled),
         };
-        let acc_m2 = scale_area(acc, cell_size_m, runoff_mm_yr);
+        let b = *surface.boundary();
+        let acc_m2 = scale_area(&acc, &order, &routing, b, cell_size_m, runoff_mm_yr);
         (filled, routing, order, acc_m2)
     };
     let _ = filled;
@@ -147,38 +149,45 @@ fn cell_epsilon(cell_size_m: f64) -> f64 {
 /// Converts cell-count accumulation to runoff-weighted m².
 ///
 /// Discharge at a cell is the *sum of upstream runoff*: every upslope cell
-/// contributes its own rainfall excess, so discharge grows downstream even
-/// when the local rainfall is uniform. Multiplying the raw cell count by the
-/// *local* runoff instead would count the wrong water — a desert cell below a
-/// wet headwater would read dry, and a wet cell below a desert would read wet.
+/// contributes its own rainfall excess through the routing tree. The old code
+/// multiplied the raw cell count by the *mean* runoff, which is exact only for
+/// uniform rain and silently wrong otherwise — a wet headwater above a desert
+/// cell read dry. Threading the tree costs one extra accumulation pass, which
+/// is the same order as the routing already paid.
 fn scale_area(
-    acc_cells: Vec<f64>,
+    acc_cells: &[f64],
+    order: &[usize],
+    routing: &crate::hydrology::FlowRouting,
+    b: Boundary,
     cell_size_m: f64,
     runoff_mm_yr: &ScalarField,
 ) -> ScalarField {
-    let b = *runoff_mm_yr.boundary();
     let base = cell_size_m * cell_size_m;
-    let mut out = ScalarField::zeros(b);
-    // Uniform-runoff fast path: discharge = contributing cells × cell area ×
-    // the (constant) runoff depth. Summing per-cell runoff through the actual
-    // accumulation tree would be exact for heterogeneous rain, but requires
-    // the tree; the tests pin uniform rain, so this path is exact there.
-    let mut uniform = 0.0f64;
-    let mut uniform_n = 0u32;
-    for &r in runoff_mm_yr.as_slice() {
-        if r.is_finite() {
-            uniform += r;
-            uniform_n += 1;
+    let mut discharge = vec![0.0f64; b.cell_count()];
+    // Seed with local runoff, then accumulate downstream in order.
+    for i in 0..b.cell_count() {
+        discharge[i] = (runoff_mm_yr.get_index(i) / 1000.0).max(0.0) * base;
+    }
+    for &idx in order {
+        if routing.total_out[idx] <= 0.0 {
+            continue;
+        }
+        let (x, y) = b.coords(idx);
+        for d in 0..8 {
+            let f = routing.fraction[idx * 8 + d];
+            if f <= 0.0 {
+                continue;
+            }
+            let (dx, dy) = crate::grid::D8_OFFSETS[d];
+            let nidx = b.index_wrapped(x as i64 + dx, y as i64 + dy);
+            discharge[nidx] += discharge[idx] * f;
         }
     }
-    let uniform = if uniform_n > 0 {
-        uniform / uniform_n as f64
-    } else {
-        0.0
-    } / 1000.0; // mm -> m
-    for (i, acc) in acc_cells.iter().enumerate().take(b.cell_count()) {
-        out.set_index(i, (acc + 1.0) * base * uniform.max(0.0));
+    let mut out = ScalarField::zeros(b);
+    for i in 0..b.cell_count() {
+        out.set_index(i, discharge[i]);
     }
+    let _ = acc_cells;
     out
 }
 
@@ -356,7 +365,11 @@ fn available_relief(surface: &ScalarField, state: &FluvialState, idx: usize, cel
     let _ = cell_size_m;
     let z = surface.get_index(idx);
     if state.total_out[idx] <= 0.0 {
-        return f64::INFINITY; // outlets drain freely
+        // Outlets drain freely, but the cut is still capped: an infinite cap
+        // let outlet cells erode without bound (13 km in one test step), and
+        // the valley floor followed them down. Cap at 10% of the cell's own
+        // height above sea-level datum instead.
+        return (z - 0.0).max(0.0) * 0.1;
     }
     let (x, y) = b.coords(idx);
     let mut lowest = f64::INFINITY;
@@ -371,7 +384,12 @@ fn available_relief(surface: &ScalarField, state: &FluvialState, idx: usize, cel
         }
     }
     if lowest.is_finite() {
-        (z - lowest).max(0.0) * 0.9
+        // Cap at 10% of the local drop per step, not 90%: the old factor let
+        // a single step remove nearly the whole relief above the receiver,
+        // so long runs excavated the thalweg to the floor every step. Capped
+        // against the *receiver* drop only — never infinity: outlet cells
+        // return a finite cap from their own elevation instead.
+        (z - lowest).max(0.0) * 0.1
     } else {
         0.0
     }
@@ -540,8 +558,29 @@ mod tests {
         let runoff = zero_runoff(b);
         let soil = unit_soil(b);
         let rock = unit_erodibility(b);
-        // An absurd timestep must still leave a drainable surface.
+        // An absurd timestep must still leave a drainable surface. Probe the
+        // deepest cut: with the 10% cap it must be a fraction of the cone's
+        // 1000 m relief, not the whole column.
         apply(&mut f, &params, 100.0, 1e7, &runoff, &soil, &rock);
+        let st = build_state(&cone(b), &params, 100.0, &runoff);
+        let mut worst_avail = 0.0f64;
+        for i in 0..b.cell_count() {
+            worst_avail = worst_avail.max(available_relief(&cone(b), &st, i, 100.0));
+        }
+        assert!(
+            worst_avail.is_finite() && worst_avail < 200.0,
+            "AVAIL worst={worst_avail}"
+        );
+        let deepest = cone(b)
+            .as_slice()
+            .iter()
+            .zip(f.as_slice())
+            .map(|(a, c)| a - c)
+            .fold(0.0f64, f64::max);
+        assert!(
+            deepest < 500.0,
+            "single step removed {deepest} m despite the relief cap"
+        );
         let (_, _, acc) = condition_d8(&f, 100.0, 1e-5);
         let b2 = *f.boundary();
         assert!(

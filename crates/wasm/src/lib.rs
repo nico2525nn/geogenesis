@@ -170,11 +170,11 @@ pub extern "C" fn gg_elevation_ptr(out_len: *mut usize) -> *mut f64 {
     };
     let mut boxed = data.into_boxed_slice();
     let ptr = boxed.as_mut_ptr();
-    let len = boxed.len() * std::mem::size_of::<f64>();
+    let len = boxed.len();
     std::mem::forget(boxed);
     if !out_len.is_null() {
         unsafe {
-            *out_len = len;
+            *out_len = len * std::mem::size_of::<f64>();
         }
     }
     ptr
@@ -242,7 +242,29 @@ pub extern "C" fn gg_stats_ptr(out_len: *mut usize) -> *mut u8 {
     ptr
 }
 
-/// Frees a buffer returned by `gg_*_ptr`. Must be called exactly once.
+/// Allocates `size` bytes owned by the engine. Free with [`gg_free`].
+///
+/// The JS side must use this instead of carving its own bump space: the bump
+/// cursor cannot know where the Rust allocator's heap starts, and overlapping
+/// it corrupts live state (the exact `unreachable` trap this fixes).
+#[no_mangle]
+pub extern "C" fn gg_alloc(size: usize) -> *mut u8 {
+    if size == 0 {
+        return std::ptr::null_mut();
+    }
+    let mut buf = vec![0u8; size];
+    let ptr = buf.as_mut_ptr();
+    std::mem::forget(buf);
+    ptr
+}
+
+/// Frees a buffer returned by `gg_*_ptr` (or [`gg_alloc`]). Call exactly once.
+///
+/// `len` is the *byte* length reported through the `out_len` slot, matching
+/// how every `gg_*_ptr` writes it. Byte-based freeing is uniform across buffer
+/// types (f64 and u8 alike) and matches the `Vec<u8>` reconstruction below.
+/// Mixing element counts and byte lengths across the boundary corrupted the
+/// allocator and trapped — the contract is bytes, everywhere.
 #[no_mangle]
 pub extern "C" fn gg_free(ptr: *mut u8, len: usize) {
     if ptr.is_null() || len == 0 {
