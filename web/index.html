@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GeoGenesis — terrain genesis engine</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <h1>GeoGenesis</h1>
+        <div id="status" role="status">loading engine…</div>
+      </header>
+      <main>
+        <section id="viewport">
+          <canvas id="scene"></canvas>
+          <div id="viewport-bar">
+            <button id="btn-generate" type="button">Generate</button>
+            <button id="btn-step" type="button">Step +1kyr</button>
+            <button id="btn-run" type="button">Run</button>
+            <label>Mode
+              <select id="sel-mode">
+                <option value="relief">Relief</option>
+                <option value="hypsometric">Hypsometric</option>
+                <option value="slope">Slope</option>
+                <option value="biome">Biome</option>
+              </select>
+            </label>
+          </div>
+          <canvas id="profile" height="96"></canvas>
+        </section>
+        <aside id="panel">
+          <section>
+            <h2>World</h2>
+            <div id="params-world" class="param-group"></div>
+          </section>
+          <section>
+            <h2>Structure</h2>
+            <div id="params-structure" class="param-group"></div>
+          </section>
+          <section>
+            <h2>Erosion</h2>
+            <div id="params-erosion" class="param-group"></div>
+          </section>
+          <section>
+            <h2>Time</h2>
+            <div id="params-time" class="param-group"></div>
+          </section>
+          <section>
+            <h2>Statistics</h2>
+            <div id="stats"></div>
+          </section>
+        </aside>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

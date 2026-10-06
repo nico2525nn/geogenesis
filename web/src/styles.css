@@ -1,0 +1,59 @@
+:root {
+  color-scheme: dark;
+  --bg: #0b0e13;
+  --panel: #12161d;
+  --line: #232b36;
+  --text: #dfe6ee;
+  --dim: #8b96a5;
+  --accent: #5fb878;
+  --warn: #d98a4b;
+  --danger: #d95b5b;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
+body { font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+#app { display: flex; flex-direction: column; height: 100vh; }
+header {
+  display: flex; align-items: baseline; gap: 16px;
+  padding: 8px 16px; border-bottom: 1px solid var(--line);
+}
+header h1 { font-size: 16px; margin: 0; letter-spacing: 0.04em; }
+#status { color: var(--dim); font-variant-numeric: tabular-nums; }
+main { display: flex; flex: 1; min-height: 0; }
+#viewport { flex: 1; position: relative; min-width: 0; display: flex; flex-direction: column; }
+#scene { flex: 1; width: 100%; min-height: 0; display: block; }
+#viewport-bar {
+  display: flex; gap: 8px; align-items: center;
+  padding: 8px 12px; border-top: 1px solid var(--line);
+}
+#viewport-bar button {
+  background: #1b222c; color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px;
+  cursor: pointer;
+}
+#viewport-bar button:disabled { opacity: 0.45; cursor: default; }
+#viewport-bar button:not(:disabled):hover { border-color: var(--accent); }
+#viewport-bar label { color: var(--dim); display: flex; gap: 6px; align-items: center; }
+#viewport-bar select {
+  background: #1b222c; color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px;
+}
+#profile { width: 100%; border-top: 1px solid var(--line); background: #0d1117; }
+#panel {
+  width: 320px; border-left: 1px solid var(--line);
+  overflow-y: auto; background: var(--panel); padding: 0 0 32px;
+}
+#panel section { padding: 10px 14px; border-bottom: 1px solid var(--line); }
+#panel h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); margin: 0 0 8px; }
+.param { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; margin-bottom: 8px; }
+.param label { color: var(--text); }
+.param output { color: var(--dim); font-variant-numeric: tabular-nums; }
+.param input[type="range"] { grid-column: 1 / -1; width: 100%; accent-color: var(--accent); }
+.param select { grid-column: 1 / -1; background: #1b222c; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; }
+#stats { font-variant-numeric: tabular-nums; }
+#stats table { border-collapse: collapse; width: 100%; }
+#stats td { padding: 2px 4px; }
+#stats td:last-child { text-align: right; color: var(--text); }
+#stats td:first-child { color: var(--dim); }
+.stat-bad { color: var(--danger); }
+.stat-warn { color: var(--warn); }
