@@ -120,15 +120,18 @@ impl Simulation {
 
         // Fluvial.
         if n % self.params.schedule.fluvial.max(1) as u64 == 0 {
+            let inputs = crate::erosion::fluvial::FluvialInputs {
+                params: &self.params.fluvial,
+                cell_size_m: cell_m,
+                dt_yr: dt,
+                runoff_mm_yr: &self.runoff_mm,
+                soil_thickness_m: &self.soil_m,
+                erodibility: &geo.erodibility,
+                order: Some(&step_order),
+            };
             let bal = crate::erosion::fluvial::apply_with_order(
                 &mut self.output.world.elevation_m,
-                &self.params.fluvial,
-                cell_m,
-                dt,
-                &self.runoff_mm,
-                &self.soil_m,
-                &geo.erodibility,
-                Some(&step_order),
+                &inputs,
             );
             step_balance.add_assign(bal);
             self.track_erosion(&bal, cell_m);

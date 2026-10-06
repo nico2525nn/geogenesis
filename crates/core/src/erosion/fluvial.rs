@@ -165,8 +165,8 @@ fn scale_area(
     let base = cell_size_m * cell_size_m;
     let mut discharge = vec![0.0f64; b.cell_count()];
     // Seed with local runoff, then accumulate downstream in order.
-    for i in 0..b.cell_count() {
-        discharge[i] = (runoff_mm_yr.get_index(i) / 1000.0).max(0.0) * base;
+    for (i, slot) in discharge.iter_mut().enumerate().take(b.cell_count()) {
+        *slot = (runoff_mm_yr.get_index(i) / 1000.0).max(0.0) * base;
     }
     for &idx in order {
         if routing.total_out[idx] <= 0.0 {
@@ -184,8 +184,8 @@ fn scale_area(
         }
     }
     let mut out = ScalarField::zeros(b);
-    for i in 0..b.cell_count() {
-        out.set_index(i, discharge[i]);
+    for (i, &q) in discharge.iter().enumerate() {
+        out.set_index(i, q);
     }
     let _ = acc_cells;
     out
@@ -250,16 +250,28 @@ pub fn apply(
     soil_thickness_m: &ScalarField,
     erodibility: &ScalarField,
 ) -> MassBalance {
-    apply_with_order(
-        surface,
+    let inputs = FluvialInputs {
         params,
         cell_size_m,
         dt_yr,
         runoff_mm_yr,
         soil_thickness_m,
         erodibility,
-        None,
-    )
+        order: None,
+    };
+    apply_with_order(surface, &inputs)
+}
+
+/// Inputs for [`apply_with_order`], grouped so the driver passes one struct.
+#[derive(Debug)]
+pub struct FluvialInputs<'a> {
+    pub params: &'a FluvialParams,
+    pub cell_size_m: f64,
+    pub dt_yr: f64,
+    pub runoff_mm_yr: &'a ScalarField,
+    pub soil_thickness_m: &'a ScalarField,
+    pub erodibility: &'a ScalarField,
+    pub order: Option<&'a [usize]>,
 }
 
 /// Applies one interval, reusing the caller's downhill order when given.
@@ -268,21 +280,23 @@ pub fn apply(
 /// descending-elevation visitation of the *current* surface.
 pub fn apply_with_order(
     surface: &mut ScalarField,
-    params: &FluvialParams,
-    cell_size_m: f64,
-    dt_yr: f64,
-    runoff_mm_yr: &ScalarField,
-    soil_thickness_m: &ScalarField,
-    erodibility: &ScalarField,
-    order: Option<&[usize]>,
+    inputs: &FluvialInputs,
 ) -> MassBalance {
     let b = *surface.boundary();
-    let dt = dt_yr.max(0.0);
+    let params = inputs.params;
+    let cell_size_m = inputs.cell_size_m;
+    let dt = inputs.dt_yr.max(0.0);
     if dt == 0.0 {
         return MassBalance::default();
     }
 
-    let state = build_state_with_order(surface, params, cell_size_m, runoff_mm_yr, order);
+    let state = build_state_with_order(
+        surface,
+        params,
+        cell_size_m,
+        inputs.runoff_mm_yr,
+        inputs.order,
+    );
     let mut balance = MassBalance::default();
     let mut suspended = vec![0.0f64; b.cell_count()];
     let m2_per_cell = cell_size_m * cell_size_m;
@@ -291,8 +305,8 @@ pub fn apply_with_order(
         let (x, y) = b.coords(idx);
         let z = surface.get(x, y);
         let slope = surface.slope(x, y, cell_size_m);
-        let soil = soil_thickness_m.get_index(idx);
-        let rock_k = erodibility.get_index(idx).clamp(0.01, 100.0);
+        let soil = inputs.soil_thickness_m.get_index(idx);
+        let rock_k = inputs.erodibility.get_index(idx).clamp(0.01, 100.0);
 
         // Erosion is proportional to how much of this cell is channel, not
         // hillslope: below the channel-area threshold only a fraction acts.
@@ -318,8 +332,13 @@ pub fn apply_with_order(
         surface.set_index(idx, z - cut);
         balance.removed_m3 += cut * m2_per_cell;
 
-        // Suspended load plus fresh cut travels onward.
+        // Suspended load plus fresh cut travels onward. Clear the entry on
+        // read: the settle-in-place pass below deposits whatever remains,
+        // and an uncleared entry would be counted twice (once routed
+        // onward here, once settled there) — the +12.5B m³ deposition
+        // excess the ledger test caught.
         let load_m = suspended[idx] + cut;
+        suspended[idx] = 0.0;
         let put_back = deposited_m.max(0.0).min(load_m);
         surface.set_index(idx, surface.get_index(idx) + put_back);
         balance.deposited_m3 += put_back * m2_per_cell;
@@ -338,6 +357,17 @@ pub fn apply_with_order(
             let (dx, dy) = crate::grid::D8_OFFSETS[d];
             let nidx = b.index_wrapped(x as i64 + dx, y as i64 + dy);
             suspended[nidx] += remaining * f;
+        }
+    }
+
+    // Stranded suspension: load still in transit whose receiver was already
+    // visited this pass. It physically settles where it is — sediment does
+    // not vanish because the visitation order ran out. Deposit it in place
+    // so the balance closes as deposition, not as phantom export.
+    for (i, &s) in suspended.iter().enumerate() {
+        if s > 0.0 {
+            surface.set_index(i, surface.get_index(i) + s);
+            balance.deposited_m3 += s * m2_per_cell;
         }
     }
 

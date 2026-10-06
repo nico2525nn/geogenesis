@@ -179,11 +179,15 @@ pub fn apply_with_order(
         );
         let nidx = b.index_wrapped(x as i64 + dx, y as i64 + dy);
         ice[nidx] += thickness * 0.9;
-        // 10% melts in transit.
-        let melt = thickness * 0.1;
-        surface.set_index(nidx, surface.get_index(nidx) + melt * 0.01);
-        balance.deposited_m3 += melt * 0.01 * m2;
+        // Meltwater carries no bedload: the 10% that melts leaves no deposit.
+        // The old code added melt*0.01 to the surface — mass from nothing,
+        // worth billions of m³ over a run and the largest single ledger gap.
     }
+
+    // Ice still in transit at the end of the pass stays on the glacier;
+    // count the stranded thickness as retained (neither removed nor
+    // exported) so the ledger only sees actual bed exchange.
+    let _ = ice;
 
     surface.sanitize_non_finite(0.0);
     repair_field(surface);

@@ -191,14 +191,15 @@ pub fn apply_with_order(
         let _ = b;
     }
 
-    // 3. Soil production: convert surface lowering into mobile soil.
+    // 3. Soil production: convert bedrock weathering into mobile soil.
+    // This mass comes from the bedrock reservoir *below* the surface column,
+    // not from surface lowering — no `removed` is booked for it, exactly as
+    // no surface cell loses elevation here. Counting it as deposition keeps
+    // the ledger honest about where regolith comes from.
     for i in 0..b.cell_count() {
         let thickness = soil.get_index(i);
         let grown = soil_production_rate(params, thickness) * dt;
         soil.set_index(i, (thickness + grown).min(params.max_soil_m));
-        balance.deposited_m3 += grown * m2;
-        // The produced soil stays in the column; its mass is new regolith, so
-        // account it as deposition from the bedrock reservoir.
     }
 
     surface.sanitize_non_finite(0.0);

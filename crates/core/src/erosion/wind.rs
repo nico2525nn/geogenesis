@@ -109,6 +109,15 @@ pub fn apply_with_order(
 
     for &idx in visit {
         let (x, y) = b.coords(idx);
+        // Consume any suspension that arrived here before this visit; the
+        // settle-in-place pass below must see only what is still in flight
+        // afterwards, or it double-counts (same bug as fluvial's).
+        let incoming = suspended[idx].max(0.0);
+        suspended[idx] = 0.0;
+        if incoming > 0.0 {
+            surface.set_index(idx, surface.get_index(idx) + incoming);
+            balance.deposited_m3 += incoming * m2;
+        }
         let cover = vegetation.get_index(idx).clamp(0.0, 1.0);
         let local_excess = (params.wind_speed_ms * (1.0 - 0.5 * cover) - threshold).max(0.0);
         if local_excess <= 0.0 {
@@ -146,18 +155,27 @@ pub fn apply_with_order(
         balance.deposited_m3 += local * m2;
         suspended[nidx] += travel;
 
-        // Shadowed cells trap what passes over them.
+        // Shadowed cells trap what passes over them. Clamp to the travel
+        // actually sent: trap is computed from the same `travel` already added
+        // to suspended[nidx], so an unclamped trap double-books it (once in
+        // suspension, once as deposit) and the ledger over-counts deposition.
         if shade > 0.5 {
-            let trap = travel * shade * 0.8;
+            let trap = (travel * shade * 0.8).min(travel).max(0.0);
             surface.set_index(idx, surface.get_index(idx) + trap);
             balance.deposited_m3 += trap * m2;
             suspended[nidx] -= trap;
         }
     }
 
-    // Anything still suspended blew off the domain.
-    for s in suspended {
-        balance.exported_m3 += s.max(0.0) * m2;
+    // Anything still suspended settles where it is: the transport pass ran
+    // out of downwind cells, but the mass is still on the grid. Counting it
+    // as export would break the ledger the same way the fluvial stranded
+    // load did.
+    for (i, &s) in suspended.iter().enumerate() {
+        if s > 0.0 {
+            surface.set_index(i, surface.get_index(i) + s);
+            balance.deposited_m3 += s * m2;
+        }
     }
 
     surface.sanitize_non_finite(0.0);
