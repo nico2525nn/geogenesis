@@ -1,7 +1,6 @@
 //! Small fixed-size vector and matrix helpers.
 //!
-//! Hand-written rather than pulled from a crate: the engine has no runtime
-//! dependencies, and these are the only linear-algebra shapes it needs.
+//! Hand-written: no runtime dependencies, only the shapes the engine needs.
 
 /// 2D vector.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -28,7 +27,7 @@ impl Vec2 {
         self.x * other.x + self.y * other.y
     }
 
-    /// Z component of the 3D cross product; the signed area of the parallelogram.
+    /// Z component of the 3D cross product.
     pub fn cross(self, other: Self) -> f64 {
         self.x * other.y - self.y * other.x
     }
@@ -98,7 +97,7 @@ impl core::ops::Neg for Vec2 {
     }
 }
 
-/// 3D vector. Used for plate kinematics in full 3D and for 3D surface normals.
+/// 3D vector.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Vec3 {
     pub x: f64,
@@ -146,7 +145,7 @@ impl Vec3 {
         Self::new(self.x * k, self.y * k, self.z * k)
     }
 
-    /// Removes the component parallel to `axis`, which must be unit length.
+    /// Removes the component parallel to `axis` (must be unit length).
     pub fn reject(self, axis: Self) -> Self {
         self - axis.scaled(self.dot(axis))
     }
@@ -217,7 +216,7 @@ impl Mat3 {
         Self::from_rows([c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0])
     }
 
-    /// Rotation about an arbitrary unit axis (Rodrigues' formula).
+    /// Rotation about an arbitrary unit axis.
     pub fn rotation_about_axis(axis: Vec3, angle: f64) -> Self {
         let a = axis.normalized();
         let (s, c) = (angle.sin(), angle.cos());
@@ -289,8 +288,6 @@ pub fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
 }
 
 /// Smooth, zero-derivative-at-both-ends window over `[-1, 1]`.
-///
-/// Used for feature falloff (a range crest must not crease where it ends).
 #[inline]
 pub fn smooth_window(x: f64) -> f64 {
     let t = clamp(x.abs(), 0.0, 1.0);
@@ -398,8 +395,7 @@ mod tests {
 
     #[test]
     fn clamp_handles_inverted_range() {
-        // An inverted range collapses to `lo` rather than silently swapping the
-        // bounds, so callers get a predictable (if degenerate) result.
+        // Inverted range collapses to `lo`.
         assert_eq!(clamp(5.0, 10.0, 0.0), 10.0);
         assert_eq!(clamp(5.0, 0.0, 10.0), 5.0);
         assert_eq!(clamp(-20.0, -10.0, 10.0), -10.0);

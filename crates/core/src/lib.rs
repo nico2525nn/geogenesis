@@ -16,11 +16,17 @@
 
 #![doc(html_root_url = "https://docs.rs/geogenesis-core/0.1.0")]
 
+pub mod climate;
+pub mod erosion;
+pub mod features;
+pub mod geology;
 pub mod grid;
 pub mod hydrology;
 pub mod linalg;
 pub mod noise;
+pub mod plates;
 pub mod rng;
+pub mod uplift;
 
 /// Result type used throughout the engine.
 pub type GeoResult<T> = core::result::Result<T, GeoError>;

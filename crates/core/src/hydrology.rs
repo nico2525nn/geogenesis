@@ -1,24 +1,7 @@
-//! Flow routing: depression filling, D8/MFD direction assignment, and flow
-//! accumulation.
+//! Flow routing: depression filling, D8/MFD directions, and flow accumulation.
 //!
-//! This module exists because of one hard truth about erosion models: **flow
-//! accumulation is only meaningful on a hydrologically conditioned surface**.
-//! Real DEMs contain closed depressions (pits, endorheic basins). Left alone,
-//! every pit becomes a sink, its drainage area is undefined, and a
-//! stream-power model will carve an unbounded spike into it. The classic
-//! failure looks like a cone of noise at every local minimum.
-//!
-//! So the pipeline is always:
-//!
-//! 1. [`fill_depressions`] — priority-flood to raise pits to their spill
-//!    elevation (Barnes et al. 2014). Fills, does not breach: this is the
-//!    conservative choice, and it is what makes the model mass-conserving.
-//! 2. [`route_d8`] or [`route_mfd`] — assign drainage directions.
-//! 3. [`accumulate_flow`] — sum upslope area in a topologically valid order.
-//!
-//! Step 3's ordering requirement is why [`ScalarField::downhill_order`] exists:
-//! iterating in raster order lets a cell receive discharge from a neighbour
-//! that has already been accumulated, which silently breaks conservation.
+//! Accumulation is only meaningful on a conditioned surface: fill, route, then
+//! accumulate in downhill order.
 
 use crate::grid::{Boundary, BoundaryKind, D8_OFFSETS, LabelField, ScalarField};
 use crate::linalg::Vec2;
@@ -71,31 +54,15 @@ impl FlowRouting {
 pub struct FillResult {
     /// The filled surface. Pointwise ≥ the input.
     pub surface: ScalarField,
-    /// Cells treated as outlets — the rim for a draining boundary, the global
-    /// minima for a torus.
-    ///
-    /// These are not "sinks" in the defect sense: on a periodic surface the
-    /// deepest point *is* the terminal basin, and there is no way to drain it
-    /// without inventing an outlet that does not exist.
+    /// Outlets: the rim for a draining boundary, the global minima for a torus.
     pub outlets: Vec<usize>,
     /// Volume of material added, in metres summed over cells.
     pub fill_volume: f64,
 }
 
-/// Fills closed depressions using the priority-flood + epsilon method.
+/// Fills closed depressions (priority-flood + epsilon gradient).
 ///
-/// Returns the filled surface where every cell has a non-increasing path to an
-/// outlet. Filled cells are raised only as far as their spill elevation
-/// requires, so the fill volume is minimal and no water is invented beyond what
-/// a real basin would hold. The result is guaranteed pointwise ≥ the input.
-///
-/// `epsilon` is the gradient imposed across flat filled areas. Without it, a
-/// flat filled basin has many cells at identical elevation and receiver
-/// assignment becomes arbitrary; the epsilon gives a consistent shallow
-/// downhill direction.
-///
-/// On a torus there is no rim, so the global minima are used as outlets instead.
-/// Those cells remain the deepest points by construction.
+/// `epsilon` imposes a shallow downhill direction across flat filled areas.
 pub fn fill_depressions_detailed(surface: &ScalarField, epsilon: f64) -> FillResult {
     let b = *surface.boundary();
     let (w, h) = (b.width(), b.height());
@@ -106,9 +73,7 @@ pub fn fill_depressions_detailed(surface: &ScalarField, epsilon: f64) -> FillRes
 
     match b.kind() {
         BoundaryKind::Toroidal => {
-            // A torus has no rim: every cell wraps to every other, so seeding the
-            // edges would be arbitrary and would leave real basins unfilled.
-            // Seed the global minima instead.
+            // A torus has no rim, so seed the global minima instead.
             let mut order: Vec<usize> = (0..b.cell_count()).collect();
             order.sort_by(|&a, &c| {
                 surface
@@ -126,7 +91,7 @@ pub fn fill_depressions_detailed(surface: &ScalarField, epsilon: f64) -> FillRes
             }
         }
         BoundaryKind::Rectangular | BoundaryKind::Spherical => {
-            // Water drains off the rim, so the rim is the outlet.
+            // The rim is the outlet.
             for y in 0..h {
                 for x in 0..w {
                     if x == 0 || y == 0 || x + 1 == w || y + 1 == h {
@@ -151,9 +116,7 @@ pub fn fill_depressions_detailed(surface: &ScalarField, epsilon: f64) -> FillRes
             }
             closed[nidx] = true;
             let nz = surface.get_index(nidx);
-            // Never lower terrain. A neighbour already below the spill level
-            // keeps its own elevation; one above is raised only to z + epsilon.
-            // Taking `max` is what guarantees the output is pointwise >= input.
+            // `max` keeps the output pointwise >= input.
             let new_z = f64::max(nz, z + epsilon);
             filled.set_index(nidx, new_z);
             queue.push(Reverse((OrderedF64(new_z), nidx)));
@@ -183,15 +146,12 @@ pub fn fill_depressions_detailed(surface: &ScalarField, epsilon: f64) -> FillRes
     }
 }
 
-/// Convenience wrapper returning only the filled surface.
+/// Returns only the filled surface.
 pub fn fill_depressions(surface: &ScalarField, epsilon: f64) -> ScalarField {
     fill_depressions_detailed(surface, epsilon).surface
 }
 
-/// Total volume of material added by depression filling, in metres × cell area.
-///
-/// Used as a diagnostic: a healthy landscape fills a few percent of its volume,
-/// whereas a pathological one fills most of it.
+/// Volume of material added by depression filling, in metres × cell area.
 pub fn fill_volume(original: &ScalarField, filled: &ScalarField) -> f64 {
     let mut sum = 0.0;
     for (a, b) in original.as_slice().iter().zip(filled.as_slice()) {
@@ -200,12 +160,7 @@ pub fn fill_volume(original: &ScalarField, filled: &ScalarField) -> f64 {
     sum
 }
 
-/// Routes drainage with the D8 (single steepest descent) method.
-///
-/// Each cell sends all of its discharge to exactly one downslope neighbour.
-/// Directional bias is real — flow is forced into the 8 compass directions,
-/// producing visible diagonal channel artefacts — but it is cheap, stable, and
-/// the right default for large grids.
+/// Routes drainage with D8 (single steepest descent).
 pub fn route_d8(surface: &ScalarField, step: f64) -> FlowRouting {
     let b = *surface.boundary();
     let n = b.cell_count();
@@ -224,8 +179,7 @@ pub fn route_d8(surface: &ScalarField, step: f64) -> FlowRouting {
 
             for (d, &(dx, dy)) in D8_OFFSETS.iter().enumerate() {
                 let nz = surface.get_wrapped(x as i64 + dx, y as i64 + dy);
-                // Drop is measured along the true step length, so diagonal and
-                // cardinal slopes are directly comparable.
+                // True step length, so diagonal and cardinal slopes compare directly.
                 let dist = crate::grid::D8_DISTANCES[d] * step;
                 let drop = (z - nz) / dist;
                 if drop > best_drop {
@@ -235,9 +189,7 @@ pub fn route_d8(surface: &ScalarField, step: f64) -> FlowRouting {
             }
 
             match best_dir {
-                // Only send flow to a genuinely lower neighbour. A cell whose
-                // neighbours are all higher (or level) is an outlet or a filled
-                // flat; give it no receiver rather than a zero-drop one.
+                // Level cells are outlets, not zero-drop receivers.
                 Some(d) if best_drop > 0.0 => {
                     receiver[idx] = d as u8;
                     fraction[idx * 8 + d] = 1.0;
@@ -258,15 +210,7 @@ pub fn route_d8(surface: &ScalarField, step: f64) -> FlowRouting {
     }
 }
 
-/// Routes drainage with MFD (multiple flow direction), exponent `p`.
-///
-/// Discharge is split among all downslope neighbours in proportion to
-/// `slope^p`. `p` near 1 gives near-uniform dispersal (diffuse hillslope flow);
-/// large `p` concentrates flow toward the steepest neighbour, converging
-/// smoothly onto D8 as `p → ∞`.
-///
-/// MFD removes D8's directional bias, at the cost of O(8n) reciprocal
-/// dependencies that must be summed in a valid topological order.
+/// Routes drainage with MFD: splits discharge among downslope neighbours as `slope^p`.
 pub fn route_mfd(surface: &ScalarField, step: f64, p: f64) -> FlowRouting {
     let b = *surface.boundary();
     let n = b.cell_count();
@@ -280,7 +224,6 @@ pub fn route_mfd(surface: &ScalarField, step: f64, p: f64) -> FlowRouting {
             let idx = b.index(x, y);
             let z = surface.get(x, y);
 
-            // Collect downslope neighbours and their weights.
             let mut weights = [0.0f64; 8];
             let mut total_weight = 0.0;
 
@@ -302,7 +245,6 @@ pub fn route_mfd(surface: &ScalarField, step: f64, p: f64) -> FlowRouting {
                     }
                 }
                 total_out[idx] = 1.0;
-                // Report the dominant receiver for D8-style consumers.
                 let mut best = 0usize;
                 for d in 1..8 {
                     if fraction[idx * 8 + d] > fraction[idx * 8 + best] {
@@ -324,21 +266,15 @@ pub fn route_mfd(surface: &ScalarField, step: f64, p: f64) -> FlowRouting {
     }
 }
 
-/// Accumulates upslope drainage area along a fixed routing.
+/// Accumulates upslope drainage area in cells.
 ///
-/// Returns area in **cells**; multiply by the cell area to get m². Each cell
-/// contributes exactly one cell of area, so for a hydrologically conditioned
-/// surface with no outlets the total must equal the cell count — that equality
-/// is the conservation check the tests use.
-///
-/// `order` must be a valid accumulation order (descending elevation on the
-/// *filled* surface). Passing a wrong order silently loses area.
+/// `order` must be descending elevation on the *filled* surface; a wrong order
+/// silently loses area.
 pub fn accumulate_flow(routing: &FlowRouting, order: &[usize]) -> Vec<f64> {
     let n = routing.fraction.len() / 8;
     let mut acc = vec![0.0f64; n];
 
     for &idx in order {
-        // Drainage area of this cell is its own plus everything routed to it.
         let out = routing.total_out[idx];
         if out <= 0.0 {
             continue;
@@ -349,11 +285,7 @@ pub fn accumulate_flow(routing: &FlowRouting, order: &[usize]) -> Vec<f64> {
             if f <= 0.0 {
                 continue;
             }
-            // MFD: the receiving cell's index is not stored, so recover it from
-            // the caller-provided order-independent geometry. Since `routing`
-            // does not retain coordinates, this is filled by
-            // `accumulate_flow_with_neighbors`; this single-D8 fast path is
-            // handled separately.
+            // Receivers are recovered from geometry in `accumulate_flow_with_neighbors`.
             let _ = f;
         }
         acc[idx] = area;
@@ -362,10 +294,6 @@ pub fn accumulate_flow(routing: &FlowRouting, order: &[usize]) -> Vec<f64> {
 }
 
 /// Accumulates drainage area, resolving receivers from geometry.
-///
-/// This is the general form: it recomputes the receiver index for each cell from
-/// the offset table, so it works for both D8 and MFD. The caller supplies the
-/// boundary and step used to build the routing so the geometry matches exactly.
 pub fn accumulate_flow_with_neighbors(
     routing: &FlowRouting,
     b: Boundary,
@@ -395,16 +323,12 @@ pub fn accumulate_flow_with_neighbors(
     acc
 }
 
-/// Elevation order valid for accumulation on `surface`.
+/// Downhill elevation order for accumulation on `surface`.
 pub fn accumulation_order(surface: &ScalarField) -> Vec<usize> {
     surface.downhill_order(crate::grid::Direction::D8)
 }
 
-/// Computes a conditioned surface ready for erosion.
-///
-/// This is the entry point erosion code should use: it fills depressions, then
-/// routes D8, then accumulates. Returns the filled surface (use *this* for the
-/// erosion stencil, not the raw one, or pits will reappear) and the routing.
+/// Fills, routes D8, and accumulates; use the filled surface for erosion.
 pub fn condition_d8(surface: &ScalarField, step: f64, epsilon: f64) -> (ScalarField, FlowRouting, Vec<f64>) {
     let filled = fill_depressions(surface, epsilon);
     let routing = route_d8(&filled, step);
@@ -413,7 +337,7 @@ pub fn condition_d8(surface: &ScalarField, step: f64, epsilon: f64) -> (ScalarFi
     (filled, routing, acc)
 }
 
-/// Computes a conditioned surface with MFD routing.
+/// Fills, routes MFD, and accumulates.
 pub fn condition_mfd(
     surface: &ScalarField,
     step: f64,
@@ -427,13 +351,9 @@ pub fn condition_mfd(
     (filled, routing, acc)
 }
 
-/// Specific discharge proxy: discharge per unit channel width.
+/// Specific discharge proxy: `q = (1/n) * h^(5/3) * S^(1/2)`.
 ///
-/// Manning-based: `q = (1/n) * h^(5/3) * S^(1/2)`, which is the standard
-/// wide-channel approximation used by stream-power implementations.
-///
-/// `depth` is flow depth in metres, `roughness` Manning's `n`, `slope` is the
-/// channel gradient (dimensionless).
+/// `depth` in metres, `roughness` is Manning's `n`, `slope` is dimensionless.
 pub fn manning_discharge(depth: f64, roughness: f64, slope: f64) -> f64 {
     if depth <= 0.0 || roughness <= 0.0 || slope <= 0.0 {
         return 0.0;
@@ -442,10 +362,7 @@ pub fn manning_discharge(depth: f64, roughness: f64, slope: f64) -> f64 {
     (1.0 / n) * depth.powf(5.0 / 3.0) * slope.sqrt()
 }
 
-/// Channel width from discharge, using `w = channel_width_coef * Q^0.5`.
-///
-/// The square root is the standard empirical result for fully rough turbulent
-/// flow: doubling width quadruples conveyance.
+/// Channel width from discharge: `w = channel_width_coef * Q^0.5`.
 pub fn channel_width(discharge: f64, width_coef: f64) -> f64 {
     if discharge <= 0.0 {
         return 0.0;
@@ -453,7 +370,7 @@ pub fn channel_width(discharge: f64, width_coef: f64) -> f64 {
     width_coef * discharge.sqrt()
 }
 
-/// Steepest-descent vector of the surface at a cell, for visualisation.
+/// Steepest-descent vector at a cell; zero at outlets.
 pub fn flow_vector(surface: &ScalarField, routing: &FlowRouting, index: usize, step: f64) -> Vec2 {
     let b = *surface.boundary();
     let dir = routing.receiver[index];
@@ -467,10 +384,7 @@ pub fn flow_vector(surface: &ScalarField, routing: &FlowRouting, index: usize, s
     Vec2::new(dx as f64 / dist, dy as f64 / dist)
 }
 
-/// Channel network: cells whose contributing area exceeds a threshold.
-///
-/// This is the drainage network a stream-power model carves. Expressed as a
-/// label field so it can be exported and overlaid.
+/// Cells whose contributing area exceeds a threshold.
 pub fn channel_network(acc: &[f64], b: Boundary, min_area_cells: f64) -> LabelField {
     let mut out = LabelField::filled(b, 0);
     for (i, &a) in acc.iter().enumerate() {
@@ -481,25 +395,19 @@ pub fn channel_network(acc: &[f64], b: Boundary, min_area_cells: f64) -> LabelFi
     out
 }
 
-/// Total drainage leaving the grid.
-///
-/// On a closed (toroidal) surface with no sinks this equals the total number of
-/// cells. Used as the conservation check for [`accumulate_flow_with_neighbors`].
+/// Total drainage leaving the grid; equals the cell count with no sinks.
 pub fn total_drainage(acc: &[f64], routing: &FlowRouting, b: Boundary) -> f64 {
-    // Sum the area of cells that lose water from the domain.
     let mut sum = 0.0;
     for idx in 0..b.cell_count() {
         if routing.total_out[idx] <= 0.0 {
-            // Outlet: its accumulated area left the system.
             sum += acc[idx] + 1.0;
         }
     }
     sum
 }
 
-/// Total accumulated area that exited via outlets, accounting for MFD fractions.
+/// Relative area lost at outlets; zero when accumulation conserves.
 pub fn conservation_error(routing: &FlowRouting, acc: &[f64], b: Boundary) -> f64 {
-    // With no sinks, total accumulated area at outlets must equal cell count.
     let total = b.cell_count() as f64;
     let exported: f64 = (0..b.cell_count())
         .filter(|&i| routing.total_out[i] <= 0.0)
@@ -508,12 +416,9 @@ pub fn conservation_error(routing: &FlowRouting, acc: &[f64], b: Boundary) -> f6
     (exported - total).abs() / total
 }
 
-/// Returns `true` if the surface contains an interior sink: a cell that is
-/// lower than every neighbour and therefore cannot drain.
+/// Returns `true` if the surface contains an interior sink.
 ///
-/// This is the condition that makes flow accumulation meaningless, so every
-/// caller should confirm it is `false` after conditioning. Rim cells are
-/// excluded because they legitimately drain off the domain.
+/// Rim cells are excluded: they drain off the domain.
 pub fn has_closed_depression(surface: &ScalarField, step: f64) -> bool {
     let b = *surface.boundary();
     let (w, h) = (b.width(), b.height());
@@ -539,10 +444,7 @@ pub fn has_closed_depression(surface: &ScalarField, step: f64) -> bool {
     false
 }
 
-/// Counts interior sinks that are *not* designated outlets.
-///
-/// On a torus the global minima are legitimate terminal basins, so counting
-/// them as defects would be wrong; pass the outlet set to exclude them.
+/// Counts interior sinks, excluding the given outlets.
 pub fn count_closed_depressions_excluding(
     surface: &ScalarField,
     outlets: &[usize],
@@ -574,16 +476,12 @@ pub fn count_closed_depressions_excluding(
     count
 }
 
-/// Counts interior sinks, for a draining boundary where every sink is a defect.
+/// Counts interior sinks on a draining boundary.
 pub fn count_closed_depressions(surface: &ScalarField) -> usize {
     count_closed_depressions_excluding(surface, &[])
 }
 
-/// Total-order wrapper so `BinaryHeap` can order `f64` keys.
-///
-/// `f64` is not `Ord`, and a hand-written `Ord` that mishandles NaN would make
-/// the priority flood spin forever on a NaN cell. `total_cmp` gives a
-/// deterministic total order, which is all the heap needs.
+/// Total-order `f64` wrapper so `BinaryHeap` has a deterministic order on NaN.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct OrderedF64(f64);
 
@@ -621,9 +519,7 @@ mod tests {
         let f = ramp_decreasing(16, 16);
         let step = 1.0;
         let routing = route_d8(&f, step);
-        // Only the left/bottom rims should be outlets for a ramp sloping to -x.
         assert!(routing.outlet_count > 0);
-        // Every interior cell must have a receiver.
         let b = *f.boundary();
         for y in 1..15 {
             for x in 1..15 {
@@ -654,7 +550,7 @@ mod tests {
 
     #[test]
     fn depression_filling_creates_no_pits() {
-        // A bowl surrounded by a rim: the classic pit.
+        // Intent: a rimmed bowl fills without leaving pits.
         let b = Boundary::new(BoundaryKind::Rectangular, 9, 9);
         let mut f = ScalarField::zeros(b);
         for y in 0..9 {
@@ -663,34 +559,28 @@ mod tests {
                 f.set(x, y, if d2 < 3.0 { -5.0 + d2 } else { 0.0 });
             }
         }
-        // Raw surface has a closed depression.
         assert!(has_closed_depression(&f, 1.0));
         let filled = fill_depressions(&f, 1e-5);
         assert!(!has_closed_depression(&filled, 1.0), "fill left a pit");
-        // Fill never lowers terrain.
         for i in 0..f.len() {
             assert!(filled.as_slice()[i] >= f.as_slice()[i] - 1e-12);
         }
-        // Fill volume is bounded by the basin: 3x3-ish bowl, a few metres deep.
         let vol = fill_volume(&f, &filled);
         assert!(vol > 0.0 && vol < 100.0, "implausible fill volume {vol}");
     }
 
     #[test]
     fn depression_filling_raises_only_to_the_spill_level() {
-        // A deep centre inside a flat wall at 10: the fill must reach the wall
-        // top (its spill elevation) and go no higher.
+        // Intent: a deep centre fills to its spill elevation and no higher.
         let b = Boundary::new(BoundaryKind::Rectangular, 5, 5);
         let mut f = ScalarField::filled(b, 10.0);
         f.set(2, 2, 1.0); // deep centre
         let filled = fill_depressions(&f, 1e-5);
-        // Epsilon accumulates along the flat, so allow a few epsilon of slack.
         assert!(
             (filled.get(2, 2) - 10.0).abs() < 1e-3,
             "centre filled to {} instead of the spill level 10",
             filled.get(2, 2)
         );
-        // Nothing may be raised above the rim height either.
         assert!(filled.max() <= 10.0 + 1e-3, "over-filled: {}", filled.max());
     }
 
@@ -704,9 +594,7 @@ mod tests {
 
     #[test]
     fn depression_filling_respects_toroidal_wrap() {
-        // A torus has no rim, so the global minima are the outlets. A basin that
-        // is not itself an outlet must still be filled even when its only escape
-        // runs across the wrap seam.
+        // Intent: basins still fill when the escape runs across the wrap seam.
         let b = Boundary::new(BoundaryKind::Toroidal, 8, 8);
         let mut f = ScalarField::filled(b, 5.0);
         f.set(0, 0, 0.0); // the global minimum: this one is an outlet
@@ -716,7 +604,6 @@ mod tests {
             result.outlets.contains(&b.index(0, 0)),
             "global minimum should be an outlet"
         );
-        // The second basin must be filled up toward the outlet level.
         assert!(
             result.surface.get(4, 4) > 1.0,
             "disconnected basin not filled: {}",
@@ -745,7 +632,6 @@ mod tests {
         let result = fill_depressions_detailed(&f, 1e-5);
         let unresolved = count_closed_depressions_excluding(&result.surface, &result.outlets);
         assert_eq!(unresolved, 0, "sinks survived filling");
-        // The only remaining sinks must be the outlets themselves.
         assert!(!result.outlets.is_empty());
     }
 
@@ -765,7 +651,7 @@ mod tests {
         let result = fill_depressions_detailed(&f, 1e-5);
         let n = b.cell_count() as f64;
         let mean_fill = result.fill_volume / n;
-        // A plausible terrain fills a modest fraction of its relief, not all of it.
+        // Intent: fill is a modest fraction of the relief.
         assert!(mean_fill > 0.0, "no depression detected at all");
         assert!(
             mean_fill < result.surface.max() - result.surface.min(),
@@ -779,7 +665,6 @@ mod tests {
         let step = 1.0;
         let (filled, routing, acc) = condition_d8(&f, step, 1e-5);
         let b = *f.boundary();
-        // On a conditioned surface with sinks only on the rim, area is conserved.
         let err = conservation_error(&routing, &acc, b);
         assert!(err < 1e-9, "area not conserved: error {err}");
         let _ = filled;
@@ -801,7 +686,6 @@ mod tests {
         let f = ramp_decreasing(20, 20);
         let (_, routing, acc) = condition_d8(&f, 1.0, 1e-5);
         let b = *f.boundary();
-        // Every cell with a receiver must have smaller accumulation than it.
         for y in 1..19 {
             for x in 1..19 {
                 let idx = b.index(x, y);
@@ -816,7 +700,7 @@ mod tests {
 
     #[test]
     fn accumulation_gathers_the_watershed_above_a_sink() {
-        // Everything must funnel to the low corner of the ramp.
+        // Intent: flow funnels to the low corner of the ramp.
         let f = ramp_decreasing(16, 16);
         let (_, routing, acc) = condition_d8(&f, 1.0, 1e-5);
         let b = *f.boundary();
@@ -826,20 +710,18 @@ mod tests {
             .enumerate()
             .max_by(|a, c| a.1.partial_cmp(c.1).unwrap())
             .unwrap();
-        // The most-accumulated cell is the outlet.
         assert!(routing.total_out[biggest.0] <= 0.0 || acc[sink] > acc[biggest.0] * 0.5);
     }
 
     #[test]
     fn mfd_splits_flow_among_neighbours() {
-        // On a ramp sloping in -x, a cell should send some flow W and some NW/SW.
+        // Intent: one cell on an -x ramp disperses across W/NW/SW.
         let f = ramp_decreasing(16, 16);
         let (_, routing, _) = condition_mfd(&f, 1.0, 1.1, 1e-5);
         let b = *f.boundary();
         let idx = b.index(8, 8);
         let dirs_used = (0..8).filter(|&d| routing.fraction_in(idx, d) > 0.0).count();
         assert!(dirs_used >= 1, "no flow at all");
-        // Fractions sum to 1.
         let sum: f64 = (0..8).map(|d| routing.fraction_in(idx, d)).sum();
         assert!((sum - 1.0).abs() < 1e-9, "fractions sum to {sum}");
     }
@@ -872,7 +754,7 @@ mod tests {
             }
         }
         assert!(dom_frac > 0.9, "high exponent did not concentrate: {dom_frac}");
-        // ramp_decreasing falls 10x faster in x than y, so E (index 0) dominates.
+        // The ramp falls 10x faster in x than y, so E (index 0) dominates.
         assert_eq!(dominant, 0, "dominant direction is not east");
     }
 
@@ -968,8 +850,7 @@ mod tests {
 
     #[test]
     fn flow_vector_points_downstream_and_is_zero_at_outlets() {
-        // ramp_decreasing falls 10 m per x step but only 1 m per y step, so the
-        // steepest descent is due east.
+        // Intent: steepest descent on this ramp is due east.
         let f = ramp_decreasing(12, 12);
         let (_, routing, _) = condition_d8(&f, 1.0, 1e-5);
         let b = *f.boundary();
@@ -984,7 +865,7 @@ mod tests {
 
     #[test]
     fn flow_vector_is_diagonal_on_an_isotropic_ramp() {
-        // Falls equally in x and y, so steepest descent is the NE diagonal.
+        // Intent: equal x/y fall gives NE flow.
         let b = Boundary::new(BoundaryKind::Rectangular, 12, 12);
         let mut f = ScalarField::zeros(b);
         for y in 0..12 {
@@ -999,7 +880,7 @@ mod tests {
 
     #[test]
     fn accumulate_requires_valid_order_to_conserve() {
-        // Demonstrates *why* the order matters: raster order loses area.
+        // Intent: raster order loses area; downhill order conserves.
         let f = ramp_decreasing(8, 8);
         let step = 1.0;
         let filled = fill_depressions(&f, 1e-5);
@@ -1010,7 +891,6 @@ mod tests {
         let good_acc = accumulate_flow_with_neighbors(&routing, b, step, &good);
         let good_err = conservation_error(&routing, &good_acc, b);
 
-        // Wrong order: reverse raster.
         let mut bad: Vec<usize> = (0..b.cell_count()).collect();
         bad.reverse();
         let bad_acc = accumulate_flow_with_neighbors(&routing, b, step, &bad);
@@ -1022,13 +902,12 @@ mod tests {
 
     #[test]
     fn priority_heap_orders_nan_definitely() {
-        // total_cmp must give a total order even for NaN so the flood terminates.
+        // Intent: NaN keys still pop in a total order.
         let a = OrderedF64(f64::NAN);
         let b = OrderedF64(1.0);
         let mut heap = BinaryHeap::new();
         heap.push(Reverse((a, 0usize)));
         heap.push(Reverse((b, 1usize)));
-        // Must pop both without panicking or looping.
         assert!(heap.pop().is_some());
         assert!(heap.pop().is_some());
         assert!(heap.pop().is_none());

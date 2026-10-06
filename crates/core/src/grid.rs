@@ -1,31 +1,18 @@
-//! Dense scalar fields and the boundary topology that makes them meaningful.
+//! Dense scalar fields with the boundary topology that makes them meaningful.
 //!
-//! The engine supports three boundary behaviours from the spec (§ Phase 0):
-//! rectangular, toroidal and spherical. They differ in how the four edges join,
-//! and every stencil in the engine (`gradient`, flow routing, diffusion,
-//! convolution) must respect that or it will leave a seam at the edge. Rather
-//! than have each stencil special-case the boundary, they all call
-//! [`Boundary`] methods, so there is exactly one place where wraparound lives.
-//!
-//! `Rectangular` edges are clamped (Neumann), which is what a finite worldmodel
-//! wants at a coastline or a study-area limit; it does not silently wrap a map
-//! onto itself.
+//! Every stencil routes edge handling through [`Boundary`]; nothing special-cases edges.
 
 use crate::linalg::{fmax, fmin, Vec2};
 
-/// The eight neighbours of a cell, in a fixed order.
+/// Neighbour count in the fixed D8 order (E, NE, N, NW, W, SW, S, SE).
 ///
-/// The order is fixed because stream-power erosion sums over it and tests
-/// compare index-to-direction mappings. Directions are ordered
-/// E, NE, N, NW, W, SW, S, SE so that index parity separates axes:
+/// Erosion sums over this order, so the mapping is load-bearing:
 ///
 /// ```text
-///   NW  N  NE      2  1  0
-///    W  ·   E  ->  3  ·  1
-///   SW  S  SE      4  5  6
+///   NW  N  NE      3  2  1
+///    W  ·   E  ->  4  ·  0
+///   SW  S  SE      5  6  7
 /// ```
-///
-/// (Indices are `DIR_COUNT`-aligned with `Dir::d8()` returning this order.)
 pub const DIR_COUNT: usize = 8;
 
 /// The eight cardinal/ordinal offsets, matching [`Direction::D8`] order.
@@ -40,7 +27,7 @@ pub const D8_OFFSETS: [(i64, i64); DIR_COUNT] = [
     (1, -1),  // SE
 ];
 
-/// Chebyshev (king-move) distance to the grid centre for each offset.
+/// Step length for each D8 offset.
 pub const D8_DISTANCES: [f64; DIR_COUNT] = [
     1.0,          // E
     std::f64::consts::SQRT_2, // NE
@@ -69,9 +56,7 @@ impl Direction {
     pub const fn offsets(self) -> &'static [(i64, i64)] {
         match self {
             Direction::D8 => &D8_OFFSETS,
-            // Axis-aligned entries of the D8 order are at these indices; the
-            // diagonal entries are duplicates of their neighbours, which would
-            // double-count them in a sum.
+            // Axis-aligned entries of the D8 order.
             Direction::Cardinal => &[
                 D8_OFFSETS[0],
                 D8_OFFSETS[2],
@@ -85,7 +70,6 @@ impl Direction {
     pub fn distances(self) -> &'static [f64] {
         match self {
             Direction::D8 => &D8_DISTANCES,
-            // First four D8 distances are 1, √2, 1, √2; cardinals are all 1.
             Direction::Cardinal => &[1.0, 1.0, 1.0, 1.0],
         }
     }
@@ -417,9 +401,6 @@ impl ScalarField {
     }
 
     /// Replaces every non-finite value with `replacement`.
-    ///
-    /// Every process in the engine calls this before handing a field onward, so
-    /// a single bad cell cannot poison an entire downstream stencil.
     pub fn sanitize_non_finite(&mut self, replacement: f64) -> usize {
         let mut count = 0;
         for v in &mut self.data {
@@ -459,14 +440,13 @@ impl ScalarField {
     /// dividing by zero.
     pub fn steepest_descent(&self, x: usize, y: usize, step: f64) -> Vec2 {
         let g = self.gradient(x, y, step);
-        // Downhill is the negative gradient.
         (-g).normalized()
     }
 
     /// 5-point Laplacian: `f(x+1) + f(x-1) + f(y+1) + f(y-1) - 4f(x,y)`.
     ///
     /// This is the discrete Laplacian *without* the `1/h²` factor; callers must
-    /// divide by `step²` to obtain units of 1/metre. Zero for any planar field.
+    /// divide by `step²` to obtain units of 1/metre.
     pub fn laplacian_raw(&self, x: usize, y: usize) -> f64 {
         let (xi, yi) = (x as i64, y as i64);
         self.get_wrapped(xi + 1, yi)
@@ -494,11 +474,8 @@ impl ScalarField {
 
     /// Applies the 5-point Laplacian smoothing kernel `iters` times.
     ///
-    /// `coef` must satisfy `coef <= 0.25` for the explicit update to be stable; the
-    /// 5-point stencil's Fourier symbol bottoms out at -8, so the amplification
-    /// factor is `1 - 8*coef` and anything above 0.25 grows without bound. The
-    /// caller owns that limit because it knows `dt` and the diffusivity;
-    /// [`crate::erosion::hillslope`] derives `coef` from the stability condition.
+    /// `coef` must satisfy `coef <= 0.25` for the explicit update to be stable;
+    /// [`crate::erosion::hillslope`] derives `coef` from that condition.
 pub fn smooth(&mut self, coef: f64, iters: usize) {
         debug_assert!(
             coef <= 0.25 + f64::EPSILON,
@@ -523,18 +500,14 @@ pub fn smooth(&mut self, coef: f64, iters: usize) {
         }
     }
 
-    /// Iterates cells in an order where every cell precedes its downstream
-    /// neighbour, for `dir`.
+    /// Cell indices in descending elevation order (`dir` is currently unused).
     ///
-    /// Erosion processes must apply in this order; raster order lets a cell
-    /// receive material from a neighbour that has already been processed, which
-    /// silently breaks mass conservation. For `Rectangular` this is descending
-    /// elevation, which is the standard solution.
+    /// Erosion must apply in this order; raster order silently breaks mass
+    /// conservation.
     pub fn downhill_order(&self, dir: Direction) -> Vec<usize> {
         let b = *self.boundary();
         let mut order: Vec<usize> = (0..b.cell_count()).collect();
-        // Descending elevation; NaN sorts last so it is processed first and
-        // cannot corrupt a well-formed neighbour.
+        // NaN sorts first so it cannot corrupt a well-formed neighbour.
         order.sort_unstable_by(|&a, &c| {
             let (va, vc) = (self.data[a], self.data[c]);
             match (va.is_nan(), vc.is_nan()) {
@@ -670,10 +643,6 @@ impl LabelField {
     }
 
     /// Distance in cells to the nearest differently-labelled cell, capped at `max`.
-    ///
-    /// A breadth-first sweep seeded from the label discontinuities, so the
-    /// result is a true Euclidean-ish chamfer distance rather than a local
-    /// gradient magnitude.
     pub fn distance_to_boundary(&self, max: usize) -> ScalarField {
         let b = self.boundary();
         let mut dist = ScalarField::filled(*b, max as f64);
@@ -720,7 +689,7 @@ impl LabelField {
 }
 
 impl LabelField {
-    /// Reads a cell with out-of-range coordinates and writes it back.
+    /// Writes a cell with out-of-range coordinates, applying boundary behaviour.
     #[inline]
     pub fn set_wrapped(&mut self, x: i64, y: i64, value: u32) {
         let i = self.boundary.index_wrapped(x, y);
@@ -1038,9 +1007,7 @@ mod tests {
 
     #[test]
     fn divergence_of_a_constant_gradient_field_is_two() {
-        // A *periodic* field is required on a torus: a linear ramp is not
-        // periodic, so its central differences at the wrap seam are meaningless.
-        // u = sin(2pi x / L), v = sin(2pi y / L) => div = k(cos+cos) = 0 mean.
+        // Periodic field: a linear ramp is not periodic on a torus.
         let bb = boundary(BoundaryKind::Toroidal, 16, 16);
         let step = 1.0;
         let k = std::f64::consts::TAU / 16.0;
@@ -1079,9 +1046,7 @@ mod tests {
                 lf.set(x, y, 1);
             }
         }
-        // Interior is x,y in 1..7. The seam sits between x=3 and x=4, so both
-        // x=3 (looking right) and x=4 (looking left) are boundary cells:
-        // 2 columns x 6 interior rows.
+        // Both columns adjacent to the seam count: 2 columns x 6 interior rows.
         assert_eq!(lf.boundary_cell_count(), 12);
     }
 

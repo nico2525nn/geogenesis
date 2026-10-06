@@ -1,21 +1,8 @@
 //! Deterministic pseudo-random number generation.
 //!
-//! Every stochastic decision in the engine must be reproducible from a single
-//! `u64` world seed. Two properties are required and tested:
-//!
-//! 1. **Determinism** — the same seed yields the same stream on every platform.
-//! 2. **Stream independence** — distinct seeds yield uncorrelated streams, so
-//!    adding a new consumer never shifts the numbers an existing consumer sees.
-//!
-//! (2) is why seed derivation goes through SplitMix64 rather than XOR-ing seeds
-//! directly: `splitmix64(seed ^ hash)` decorrelates neighbouring seeds, which
-//! `seed ^ hash` does not (seeds 1 and 2 differ in one bit and would produce
-//! nearly identical streams).
+//! Same seed yields the same stream on every platform; sub-seeds are SplitMix64-decorrelated.
 
-/// Mixes a `u64` into a well-distributed `u64`.
-///
-/// SplitMix64's finalizer. Avalanches all 64 input bits into all 64 output bits,
-/// so consecutive inputs produce non-adjacent outputs.
+/// Mixes a `u64` into a well-distributed `u64` (SplitMix64 finalizer).
 #[inline]
 pub const fn mix64(mut z: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -24,17 +11,13 @@ pub const fn mix64(mut z: u64) -> u64 {
 }
 
 /// Derives an independent sub-seed from a parent seed and a domain label.
-///
-/// Domain labels are declared as constants (`DOMAIN_PLATES`, ...) so that adding
-/// a new subsystem cannot perturb existing ones.
+/// New domain constants must not perturb existing streams.
 #[inline]
 pub const fn derive_seed(parent: u64, domain: u64) -> u64 {
     mix64(parent.wrapping_add(domain.wrapping_mul(0x9e37_79b9_7f4a_7c15)))
 }
 
-/// The xoshiro256++ generator: statistically strong, 4×64-bit state, no
-/// dependencies. Chosen over `rand`'s `StdRng` so the engine has no runtime
-/// dependency and so the exact stream is pinned by this file.
+/// xoshiro256++ generator; exact stream is pinned by this file.
 #[derive(Clone)]
 pub struct Rng {
     state: [u64; 4],
@@ -42,12 +25,11 @@ pub struct Rng {
 
 impl core::fmt::Debug for Rng {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // Do not print the state: it is 256 bits of noise and useless to humans.
+        // State is 256 bits of noise; not useful to print.
         f.write_str("Rng { .. }")
     }
 }
 
-/// Builds an RNG from a world seed plus a domain label.
 impl Rng {
     /// Creates a generator for the given domain of `parent`.
     pub fn new(parent: u64, domain: u64) -> Self {
@@ -56,8 +38,7 @@ impl Rng {
 
     /// Creates a generator from an already-derived seed.
     pub fn from_seed(seed: u64) -> Self {
-        // SplitMix64-expanded initial state: even a zero seed yields a
-        // non-degenerate generator, unlike a naive `[0,0,0,seed]`.
+        // SplitMix64 expansion: a zero seed still yields a non-degenerate state.
         let mut z = seed;
         let mut state = [0u64; 4];
         let mut i = 0;
@@ -66,7 +47,7 @@ impl Rng {
             state[i] = mix64(z);
             i += 1;
         }
-        // xoshiro requires a nonzero state; mix64(0) != 0 so this is belt and braces.
+        // xoshiro requires nonzero state; mix64(0) != 0 makes this unreachable.
         if state == [0; 4] {
             state[0] = 0x9e37_79b9_7f4a_7c15;
         }
@@ -96,23 +77,17 @@ impl Rng {
     /// Returns a uniformly distributed `u32`.
     #[inline]
     pub fn next_u32(&mut self) -> u32 {
-        // Use the high bits: low bits of xoshiro++ are the weakest.
+        // Low bits of xoshiro++ are weakest; shift to the high bits.
         (self.next_u64() >> 32) as u32
     }
 
     /// Returns a uniform value in `[0, 1)`.
-    ///
-    /// Uses 53 significant bits so every `f64` in `[0,1)` is reachable.
     #[inline]
     pub fn next_f64(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
     }
 
-    /// Returns a uniform value in `[low, high)`.
-    ///
-    /// Returns `low` when the interval is empty or inverted, rather than
-    /// panicking: callers clamp parameters, so degenerate ranges are reachable
-    /// in practice and must not abort a generation run.
+    /// Returns a uniform value in `[low, high)`; returns `low` for an empty or inverted range.
     #[inline]
     pub fn range_f64(&mut self, low: f64, high: f64) -> f64 {
         if !(high > low) {
@@ -121,10 +96,7 @@ impl Rng {
         low + (high - low) * self.next_f64()
     }
 
-    /// Returns a uniform integer in `[0, n)`.
-    ///
-    /// Debiased modulo: plain `next_u32() % n` skews toward low values when `n`
-    /// does not divide `2^32`.
+    /// Returns a uniform integer in `[0, n)` via debiased modulo.
     #[inline]
     pub fn below_u32(&mut self, n: u32) -> u32 {
         if n == 0 {
@@ -139,19 +111,16 @@ impl Rng {
         }
     }
 
-    /// Returns a uniformly distributed direction in `[0, 2π)`.
+    /// Returns a uniform direction in `[0, 2π)` (radians).
     #[inline]
     pub fn next_angle(&mut self) -> f64 {
         self.next_f64() * core::f64::consts::TAU
     }
 
     /// Standard normal deviate via the Box–Muller transform.
-    ///
-    /// Used for velocity and roughness perturbations, which must be symmetric
-    /// about zero rather than clamped to a uniform box.
     #[inline]
     pub fn next_normal(&mut self) -> f64 {
-        // u1 must be > 0 for ln; clamp away from exactly zero.
+        // Guard `ln(0)` by clamping away from zero.
         let u1 = (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64);
         let u1 = if u1 <= f64::MIN_POSITIVE { f64::MIN_POSITIVE } else { u1 };
         let u2 = self.next_f64();
@@ -182,10 +151,7 @@ impl Rng {
     }
 }
 
-/// Deterministic hash of a coordinate pair to a `u64`.
-///
-/// Domain-separated so that lattice noise sampling and feature placement cannot
-/// alias onto one another.
+/// Deterministic domain-separated hash of a coordinate pair to a `u64`.
 #[inline]
 pub const fn hash2(x: i64, y: i64, seed: u64) -> u64 {
     let a = mix64((x as u64) ^ seed);
@@ -204,7 +170,7 @@ pub fn hash2_f64(x: i64, y: i64, seed: u64) -> f64 {
     (hash2(x, y, seed) >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
 }
 
-/// Domain labels. Never reuse a value for a different purpose.
+/// Domain labels; never reuse a value.
 pub mod domain {
     pub const PLATES: u64 = 0x01;
     pub const HOTSPOTS: u64 = 0x02;
@@ -224,8 +190,7 @@ mod tests {
 
     #[test]
     fn mix64_avalanches_adjacent_inputs() {
-        // Adjacent seeds must not produce adjacent outputs, or neighbouring
-        // worlds would look like shifted copies of each other.
+        // Neighbouring worlds must not look like shifted copies.
         let a = mix64(1);
         let b = mix64(2);
         assert_ne!(a, b);
@@ -260,7 +225,7 @@ mod tests {
 
     #[test]
     fn next_f64_is_roughly_uniform() {
-        // Bucket into deciles; a correct generator lands within a few percent.
+        // Deciles must land within a few percent of uniform.
         let mut rng = Rng::from_seed(99);
         let mut buckets = [0u32; 10];
         const N: u32 = 200_000;
@@ -370,8 +335,7 @@ mod tests {
 
     #[test]
     fn hash_uniformity_over_grid() {
-        // Neighbouring lattice cells must not share a bucket, otherwise value
-        // noise shows visible axis-aligned structure.
+        // Neighbouring lattice cells must not share a bucket.
         let mut buckets = [0u32; 8];
         for x in 0..200 {
             for y in 0..200 {
