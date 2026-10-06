@@ -1,13 +1,19 @@
 [workspace]
+resolver = "2"
 members = [
     "crates/core",
-    "crates/wasm-api",
-    "crates/cli",
-    "crates/bench",
 ]
-resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+rust-version = "1.75"
 license = "MIT"
+repository = "https://example.invalid/geogenesis"
+
+[workspace.dependencies]
+geogenesis-core = { path = "crates/core" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"

@@ -1,232 +1,1083 @@
-use rand::Rng;
-use rand_xoshiro::Xoshiro256StarStar;
-use rand::SeedableRng;
-use serde::{Deserialize, Serialize};
+//! Noise functions and fractal combinators.
+//!
+//! Implements the five base functions required by spec §2a — Perlin, Simplex,
+//! Value, Wavelet, Gaussian spike — plus the octave combinators (fBm, ridged,
+//! billow, domain warp) and the anisotropy control.
+//!
+//! Two conventions matter for reproducibility and are enforced here:
+//!
+//! * **Lattice gradients come from [`crate::rng::hash2`], not from a table that
+//!   is shuffled per-generator.** A shuffled table would make results depend on
+//!   construction order; hashing makes every sample a pure function of
+//!   `(lattice, seed)`.
+//! * **Every base function returns values in `[-1, 1]`.** Fractal combinators
+//!   therefore stay in range without per-octave renormalisation, so amplitude
+//!   relationships between octaves are preserved exactly.
 
-/// ノイズタイプ
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub enum NoiseType {
+use crate::grid::{Boundary, ScalarField};
+use crate::linalg::{lerp, Vec2};
+use crate::rng::{domain, hash2, hash2_f64, hash3};
+
+/// The base noise function, per spec §2a `ノイズタイプ`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NoiseKind {
+    /// Gradient noise on a square lattice.
+    #[default]
     Perlin,
+    /// Simplex noise on a skewed triangular lattice: no directional artefacts
+    /// and about 40% fewer corner evaluations than Perlin in 2D.
     Simplex,
+    /// Value noise: random values at lattice points, quintic-interpolated.
     Value,
+    /// Iterated dyadic wavelet (quadratic spline) upsampling of a coarse field.
     Wavelet,
+    /// Sparse Gaussian bumps on a jittered lattice.
     GaussianSpike,
 }
 
-/// ノイズ生成パラメータ
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NoiseConfig {
-    pub noise_type: NoiseType,
-    pub octaves: u32,
-    pub lacunarity: f64,
-    pub persistence: f64,
-    pub anisotropy: f64,
-    pub seed: u64,
+/// Fractal combinator applied on top of the base function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FractalKind {
+    /// Fractional Brownian motion: the classic sum of octaves.
+    #[default]
+    Fbm,
+    /// Ridged multifractal: `1 - |n|`, squared. Produces sharp crests, which is
+    /// what mountain ranges look like.
+    Ridged,
+    /// Billow: `|n|`. Produces rounded, dune-like lobes.
+    Billow,
 }
 
-impl Default for NoiseConfig {
+/// Directional bias for anisotropic noise, per spec §2a `異方性`.
+///
+/// `amount` is 0 (isotropic) to 1 (fully directional). `direction` is the angle
+/// in radians of the stretched axis.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Anisotropy {
+    pub amount: f64,
+    pub direction: f64,
+}
+
+impl Default for Anisotropy {
     fn default() -> Self {
         Self {
-            noise_type: NoiseType::Perlin,
+            amount: 0.0,
+            direction: 0.0,
+        }
+    }
+}
+
+impl Anisotropy {
+    /// Returns `true` when no domain transform is needed.
+    pub fn is_isotropic(&self) -> bool {
+        self.amount <= f64::EPSILON
+    }
+
+    /// Stretches the sample domain along the principal axis.
+    ///
+    /// Compresses across the axis as it stretches along it, so the noise
+    /// *feature size* grows along the direction rather than the overall scale
+    /// shrinking. That is what "directional" means for mountain belts: long and
+    /// continuous in one direction, fine-grained across it.
+    #[inline]
+    fn warp(&self, x: f64, y: f64) -> (f64, f64) {
+        if self.is_isotropic() {
+            return (x, y);
+        }
+        let a = self.amount.clamp(0.0, 1.0);
+        let (c, s) = (self.direction.cos(), self.direction.sin());
+        // Rotate into the principal frame.
+        let u = x * c + y * s;
+        let v = -x * s + y * c;
+        // Compress the noise coordinate *along* the axis and expand it across,
+        // which is what makes features physically longer along the axis: a
+        // feature of length L in noise space spans L / k in world space, so a
+        // small k along u yields a long world-space feature. Scaling the other
+        // way would do the opposite (compress features along the axis).
+        let (u2, v2) = (u / (1.0 + a), v * (1.0 + a));
+        (u2 * c - v2 * s, u2 * s + v2 * c)
+    }
+}
+
+/// Complete noise configuration, matching spec §2a.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NoiseParams {
+    pub kind: NoiseKind,
+    pub fractal: FractalKind,
+    /// 1–16, per spec.
+    pub octaves: u32,
+    /// 1.0–4.0, per spec.
+    pub lacunarity: f64,
+    /// 0.1–1.0, per spec.
+    pub persistence: f64,
+    pub anisotropy: Anisotropy,
+    /// Domain-warp amplitude in lattice units; 0 disables warping.
+    pub warp_strength: f64,
+}
+
+impl Default for NoiseParams {
+    fn default() -> Self {
+        Self {
+            kind: NoiseKind::default(),
+            fractal: FractalKind::default(),
             octaves: 6,
             lacunarity: 2.0,
             persistence: 0.5,
-            anisotropy: 0.0,
-            seed: 42,
+            anisotropy: Anisotropy::default(),
+            warp_strength: 0.0,
         }
     }
 }
 
-/// ノイズ生成エンジン
-pub struct NoiseGenerator {
-    rng: Xoshiro256StarStar,
-    perm: [usize; 512],
+impl NoiseParams {
+    /// Creates isotropic fBm with the given seed-derived domain.
+    pub fn fbm(kind: NoiseKind, octaves: u32, seed: u64) -> Self {
+        let _ = seed;
+        Self {
+            kind,
+            octaves,
+            ..Self::default()
+        }
+    }
 }
 
-impl NoiseGenerator {
-    pub fn new(seed: u64) -> Self {
-        let mut rng = Xoshiro256StarStar::seed_from_u64(seed);
-        let mut perm = [0usize; 512];
-        let mut p = [0usize; 256];
-        for i in 0..256 {
-            p[i] = i;
+/// Quintic smoothstep `6t⁵ − 15t⁴ + 10t³`.
+///
+/// Zero first *and* second derivatives at the lattice points, which is what
+/// prevents the visible grid creases that cubic (Perlin's original) fades show.
+#[inline]
+fn quintic(t: f64) -> f64 {
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
+/// Picks a reproducible gradient direction from a lattice hash.
+///
+/// Returns a unit vector on one of 16 directions, indexed by the low bits of
+/// the hash. Using discrete directions from a hash — rather than floating-point
+/// hashing — is what makes results bit-identical across platforms.
+///
+/// Sixteen rather than eight: the classic 8-direction set spends four of its
+/// eight entries on the coordinate axes, which biases the noise toward
+/// axis-aligned structure (visible as faint grid-aligned creasing on terrain).
+#[inline]
+fn gradient_from_hash(h: u64) -> (f64, f64) {
+    // cos/sin of multiples of 22.5 degrees, precomputed to avoid `cos` calls
+    // in the inner loop (this function runs tens of millions of times).
+    const DIRS: [(f64, f64); 16] = [
+        (1.0, 0.0),
+        (0.923_879_532_511_286_7, 0.382_683_432_365_089_8),
+        (0.707_106_781_186_547_6, 0.707_106_781_186_547_6),
+        (0.382_683_432_365_089_8, 0.923_879_532_511_286_7),
+        (0.0, 1.0),
+        (-0.382_683_432_365_089_8, 0.923_879_532_511_286_7),
+        (-0.707_106_781_186_547_6, 0.707_106_781_186_547_6),
+        (-0.923_879_532_511_286_7, 0.382_683_432_365_089_8),
+        (-1.0, 0.0),
+        (-0.923_879_532_511_286_7, -0.382_683_432_365_089_8),
+        (-0.707_106_781_186_547_6, -0.707_106_781_186_547_6),
+        (-0.382_683_432_365_089_8, -0.923_879_532_511_286_7),
+        (0.0, -1.0),
+        (0.382_683_432_365_089_8, -0.923_879_532_511_286_7),
+        (0.707_106_781_186_547_6, -0.707_106_781_186_547_6),
+        (0.923_879_532_511_286_7, -0.382_683_432_365_089_8),
+    ];
+    DIRS[(h & 15) as usize]
+}
+
+/// 2D Perlin gradient noise in `[-1, 1]`.
+pub fn perlin_2d(x: f64, y: f64, seed: u64) -> f64 {
+    let xi = x.floor();
+    let yi = y.floor();
+    let xf = x - xi;
+    let yf = y - yi;
+    let (xi, yi) = (xi as i64, yi as i64);
+
+    let u = quintic(xf);
+    let v = quintic(yf);
+
+    let (gx0, gy0) = gradient_from_hash(hash2(xi, yi, seed));
+    let (gx1, gy1) = gradient_from_hash(hash2(xi + 1, yi, seed));
+    let (gx2, gy2) = gradient_from_hash(hash2(xi, yi + 1, seed));
+    let (gx3, gy3) = gradient_from_hash(hash2(xi + 1, yi + 1, seed));
+
+    let n00 = gx0 * xf + gy0 * yf;
+    let n10 = gx1 * (xf - 1.0) + gy1 * yf;
+    let n01 = gx2 * xf + gy2 * (yf - 1.0);
+    let n11 = gx3 * (xf - 1.0) + gy3 * (yf - 1.0);
+
+    let a = lerp(n00, n10, u);
+    let b = lerp(n01, n11, u);
+    lerp(a, b, v)
+}
+
+// 2D simplex skew/unskew constants from Gustavson's construction.
+// SQRT_3 is inlined because `std::f64::consts::SQRT_3` is still unstable.
+const SQRT_3: f64 = 1.732_050_807_568_877_2;
+const F2: f64 = 0.5 * (3.0 - SQRT_3);
+const G2: f64 = (3.0 - SQRT_3) / 6.0;
+
+/// 2D Simplex noise in `[-1, 1]`.
+pub fn simplex_2d(x: f64, y: f64, seed: u64) -> f64 {
+    // Skew the input space so the square lattice becomes a triangular one.
+    let s = (x + y) * F2;
+    let i = (x + s).floor();
+    let j = (y + s).floor();
+    let t = (i + j) * G2;
+    let x0 = x - (i - t);
+    let y0 = y - (j - t);
+
+    // Determine which of the two triangles of the rhombus we are in.
+    let (i1, j1) = if x0 > y0 { (1.0, 0.0) } else { (0.0, 1.0) };
+
+    let x1 = x0 - i1 + G2;
+    let y1 = y0 - j1 + G2;
+    let x2 = x0 - 1.0 + 2.0 * G2;
+    let y2 = y0 - 1.0 + 2.0 * G2;
+
+    let (ii, jj) = (i as i64, j as i64);
+    let (n0, n1, n2) = (
+        simplex_corner(x0, y0, ii, jj, seed),
+        simplex_corner(x1, y1, ii + i1 as i64, jj + j1 as i64, seed),
+        simplex_corner(x2, y2, ii + 1, jj + 1, seed),
+    );
+
+    // Simplex noise needs 70 * sum(n) to land back in [-1, 1].
+    70.0 * (n0 + n1 + n2)
+}
+
+/// Contributes one simplex corner.
+#[inline]
+fn simplex_corner(x: f64, y: f64, i: i64, j: i64, seed: u64) -> f64 {
+    // Radial falloff: the contribution dies beyond radius ~0.5.
+    let t = 0.5 - x * x - y * y;
+    if t < 0.0 {
+        return 0.0;
+    }
+    let t2 = t * t;
+    let (gx, gy) = gradient_from_hash(hash2(i, j, seed));
+    t2 * t2 * (gx * x + gy * y)
+}
+
+/// 2D value noise in `[-1, 1]`.
+pub fn value_2d(x: f64, y: f64, seed: u64) -> f64 {
+    let xi = x.floor();
+    let yi = y.floor();
+    let xf = x - xi;
+    let yf = y - yi;
+    let (xi, yi) = (xi as i64, yi as i64);
+
+    let u = quintic(xf);
+    let v = quintic(yf);
+
+    let n00 = hash2_f64(xi, yi, seed);
+    let n10 = hash2_f64(xi + 1, yi, seed);
+    let n01 = hash2_f64(xi, yi + 1, seed);
+    let n11 = hash2_f64(xi + 1, yi + 1, seed);
+
+    let a = lerp(n00, n10, u);
+    let b = lerp(n01, n11, u);
+    // hash2_f64 is in [0, 1); map to [-1, 1).
+    2.0 * lerp(a, b, v) - 1.0
+}
+
+/// 2D wavelet noise in `[-1, 1]`.
+///
+/// Successively interpolates between a coarse random field and the value at
+/// `x / 2`, halving the amplitude each level. The result has sharper, more
+/// "geometric" features than Perlin because each level is an interpolation of a
+/// lower-resolution lattice rather than a sum of independent octaves.
+pub fn wavelet_2d(x: f64, y: f64, seed: u64, levels: u32) -> f64 {
+    let (mut value, mut lo, mut hi) = (0.0f64, x, y);
+    for level in 0..levels.max(1) {
+        let lattice = hash2_f64(lo.floor() as i64, hi.floor() as i64, seed ^ level as u64);
+        let t = quintic(x - lo.floor());
+        // Quadratic B-spline blending weight: `3t² − 2t³` restricted to a cell.
+        let w = (t * t * (3.0 - 2.0 * t)).clamp(0.0, 1.0);
+        let detail = 2.0 * lattice - 1.0;
+        value += detail * (1.0 - w) * 0.5;
+        lo *= 0.5;
+        hi *= 0.5;
+    }
+    value
+}
+
+/// 2D Gaussian-spike noise, in `[0, 1)`.
+///
+/// Sums narrow Gaussian bumps on a jittered lattice. Unlike the other four
+/// functions this one is **not** continuous in the usual sense: it is intended
+/// for pinpointing discrete features (volcanoes, calderas), where a smooth
+/// continuum would blur them into their surroundings.
+///
+/// Returns a *non-negative* field where `0` means "no feature here", which is
+/// what lets callers treat it as a mask. The result is not centred on zero:
+/// subtracting a midpoint would turn feature-free ground into a negative
+/// signal indistinguishable from a weak trough.
+pub fn gaussian_spike_2d(x: f64, y: f64, seed: u64, density: f64, width: f64) -> f64 {
+    let base = x.floor();
+    let by = y.floor();
+    let mut sum = 0.0;
+
+    // 3x3 neighbourhood is enough for width < 1.
+    for oy in -1i64..=1 {
+        for ox in -1i64..=1 {
+            let ci = base as i64 + ox;
+            let cj = by as i64 + oy;
+            let h = hash3(ci, cj, 0, seed);
+            // Occupancy: only `density` of lattice cells hold a spike.
+            let r = (h >> 11) as f64 / (1u64 << 53) as f64;
+            if r > density {
+                continue;
+            }
+            // Jitter the centre within the cell so spikes are not grid-aligned.
+            // Kept under a third of the cell so neighbouring spikes stay
+            // resolvable as separate landforms rather than merging.
+            let jx = ci as f64 + (hash2_f64(ci, cj, seed ^ 0xAA) - 0.5) * 0.3;
+            let jy = cj as f64 + (hash2_f64(ci, cj, seed ^ 0x55) - 0.5) * 0.3;
+            let dx = x - jx;
+            let dy = y - jy;
+            let amp = 0.75 + 0.25 * hash2_f64(ci, cj, seed ^ 0x33);
+            sum += amp * (-(dx * dx + dy * dy) / (2.0 * width * width)).exp();
         }
-        for i in (0..256).rev() {
-            let j = rng.gen_range(0..=i);
-            p.swap(i, j);
-        }
-        for i in 0..512 {
-            perm[i] = p[i & 255];
-        }
-        Self { rng, perm }
+    }
+    // Soft saturation rather than a clamp. Overlapping bumps sum above 1, and a
+    // `clamp` would flatten a whole saturated region to exactly 1.0, erasing the
+    // ordering between peaks inside it. `s / (1 + s)` is strictly increasing in
+    // `s`, maps [0, inf) into [0, 1), and preserves the relative ordering that
+    // features.rs needs to find distinct peaks.
+    sum / (1.0 + sum)
+}
+
+/// Evaluates the base function for `kind` at a single point.
+#[inline]
+fn eval_base(kind: NoiseKind, x: f64, y: f64, seed: u64) -> f64 {
+    match kind {
+        NoiseKind::Perlin => perlin_2d(x, y, seed),
+        NoiseKind::Simplex => simplex_2d(x, y, seed),
+        NoiseKind::Value => value_2d(x, y, seed),
+        NoiseKind::Wavelet => wavelet_2d(x, y, seed, 3),
+        NoiseKind::GaussianSpike => gaussian_spike_2d(x, y, seed, 0.25, 0.5),
+    }
+}
+
+/// Evaluates `params` at one point, applying anisotropy, warping and octaves.
+///
+/// Result is in `[-1, 1]`: octaves are summed with a normalising weight so the
+/// total stays bounded regardless of octave count or persistence.
+pub fn sample(params: &NoiseParams, x: f64, y: f64, seed: u64) -> f64 {
+    let (mut px, mut py) = params.anisotropy.warp(x, y);
+
+    if params.warp_strength > 0.0 {
+        // Domain warping: displace the sample point by low-frequency noise.
+        // This bends features into plausible-looking curving shapes (drainage,
+        // range belts) that unwarped fBm cannot produce.
+        let ws = params.warp_strength;
+        let wx = perlin_2d(px, py, seed ^ 0xDEAD_BEEF);
+        let wy = perlin_2d(px + 5.2, py + 1.3, seed ^ 0xBEEF_DEAD);
+        px += ws * wx;
+        py += ws * wy;
     }
 
-    fn fade(t: f64) -> f64 {
-        t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+    let octaves = params.octaves.clamp(1, 16);
+    let lac = params.lacunarity.clamp(1.0, 4.0);
+    let pers = params.persistence.clamp(0.1, 1.0);
+
+    let mut value = 0.0;
+    let mut amplitude = 1.0;
+    let mut frequency = 1.0;
+    let mut norm = 0.0;
+
+    for octave in 0..octaves {
+        let n = eval_base(params.kind, px * frequency, py * frequency, seed.wrapping_add(octave as u64));
+        let shaped = match params.fractal {
+            FractalKind::Fbm => n,
+            FractalKind::Ridged => {
+                let r = 1.0 - n.abs();
+                // Square for sharper crests; subtract 0.5 to re-centre on 0.
+                r * r - 0.5
+            }
+            FractalKind::Billow => n.abs() - 0.5,
+        };
+        value += shaped * amplitude;
+        norm += amplitude;
+        amplitude *= pers;
+        frequency *= lac;
     }
 
-    fn lerp(a: f64, b: f64, t: f64) -> f64 {
-        a + t * (b - a)
+    if norm > 0.0 {
+        value /= norm;
+    }
+    // Base functions are in [-1, 1]; the ridged/billow re-centring can push a
+    // little past the edge, so clamp to honour the documented contract.
+    value.clamp(-1.0, 1.0)
+}
+
+/// A stateless noise field sampler: the engine evaluates noise tens of millions
+/// of times per world, so seed selection lives here rather than at call sites.
+#[derive(Debug, Clone)]
+pub struct NoiseField {
+    params: NoiseParams,
+    seed: u64,
+}
+
+impl NoiseField {
+    /// Creates a field for `params`, drawing a domain seed from `world_seed`.
+    pub fn new(params: NoiseParams, world_seed: u64) -> Self {
+        let seed = crate::rng::derive_seed(world_seed, domain_for(params.kind));
+        Self { params, seed }
     }
 
-    fn grad(hash: usize, x: f64, y: f64) -> f64 {
-        let h = hash & 3;
-        let u = if h & 1 == 0 { x } else { -x };
-        let v = if h & 2 == 0 { y } else { -y };
-        u + v
+    /// Uses an explicit seed instead of deriving one.
+    pub fn with_seed(params: NoiseParams, seed: u64) -> Self {
+        Self { params, seed }
     }
 
-    /// 2次元 Perlin ノイズ [-1, 1]
-    pub fn perlin_2d(&self, x: f64, y: f64) -> f64 {
-        let xi = x.floor() as i64;
-        let yi = y.floor() as i64;
-        let xf = x - xi as f64;
-        let yf = y - yi as f64;
-        let u = Self::fade(xf);
-        let v = Self::fade(yf);
-
-        let aa = self.perm[(self.perm[(xi & 255) as usize] + (yi & 255) as usize) & 511];
-        let ab = self.perm[(self.perm[(xi & 255) as usize] + ((yi + 1) & 255) as usize) & 511];
-        let ba = self.perm[(self.perm[((xi + 1) & 255) as usize] + (yi & 255) as usize) & 511];
-        let bb = self.perm[(self.perm[((xi + 1) & 255) as usize] + ((yi + 1) & 255) as usize) & 511];
-
-        let x1 = Self::lerp(Self::grad(aa, xf, yf), Self::grad(ba, xf - 1.0, yf), u);
-        let x2 = Self::lerp(Self::grad(ab, xf, yf - 1.0), Self::grad(bb, xf - 1.0, yf - 1.0), u);
-        Self::lerp(x1, x2, v)
+    /// Current parameters.
+    pub fn params(&self) -> &NoiseParams {
+        &self.params
     }
 
-    /// 2次元 Simplex ノイズ [-1, 1]
-    pub fn simplex_2d(&self, x: f64, y: f64) -> f64 {
-        let s = (x + y) * 0.3660254037844386;
-        let i = (x + s).floor();
-        let j = (y + s).floor();
-        let t = (i + j) * 0.21132486540518713;
-        let x0 = x - (i - t);
-        let y0 = y - (j - t);
-
-        let (i1, j1) = if x0 > y0 { (1, 0) } else { (0, 1) };
-        let x1 = x0 - i1 as f64 + 0.21132486540518713;
-        let y1 = y0 - j1 as f64 + 0.21132486540518713;
-        let x2 = x0 - 1.0 + 2.0 * 0.21132486540518713;
-        let y2 = y0 - 1.0 + 2.0 * 0.21132486540518713;
-
-        let ii = (i as i64) & 255;
-        let jj = (j as i64) & 255;
-
-        let idx0 = (ii as usize + self.perm[jj as usize]) & 511;
-        let idx1 = (ii as usize + i1 as usize + self.perm[(jj + j1) as usize]) & 511;
-        let idx2 = (ii as usize + 1 + self.perm[(jj + 1) as usize]) & 511;
-
-        let n0 = self.simplex_corner(x0, y0, self.perm[idx0]);
-        let n1 = self.simplex_corner(x1, y1, self.perm[idx1]);
-        let n2 = self.simplex_corner(x2, y2, self.perm[idx2]);
-
-        n0 + n1 + n2
+    /// The derived seed.
+    pub fn seed(&self) -> u64 {
+        self.seed
     }
 
-    fn simplex_corner(&self, x: f64, y: f64, hash: usize) -> f64 {
-        let t = 0.5 - x * x - y * y;
-        if t < 0.0 {
-            0.0
-        } else {
-            let t2 = t * t;
-            t2 * t2 * Self::grad(hash, x, y)
-        }
+    /// Evaluates at a point.
+    #[inline]
+    pub fn sample(&self, x: f64, y: f64) -> f64 {
+        sample(&self.params, x, y, self.seed)
     }
 
-    /// バリューノイズ [-1, 1]
-    pub fn value_2d(&self, x: f64, y: f64) -> f64 {
-        let xi = x.floor() as i64;
-        let yi = y.floor() as i64;
-        let xf = x - xi as f64;
-        let yf = y - yi as f64;
-        let u = Self::fade(xf);
-        let v = Self::fade(yf);
-
-        let n00 = self.hash_f64(xi, yi);
-        let n10 = self.hash_f64(xi + 1, yi);
-        let n01 = self.hash_f64(xi, yi + 1);
-        let n11 = self.hash_f64(xi + 1, yi + 1);
-
-        Self::lerp(Self::lerp(n00, n10, u), Self::lerp(n01, n11, u), v) * 2.0 - 1.0
-    }
-
-    fn hash_f64(&self, x: i64, y: i64) -> f64 {
-        let h = self.perm[(x & 255) as usize] ^ (y & 255) as usize;
-        let h = (h.wrapping_mul(0x9E3779B9)) & 0xFF;
-        h as f64 / 255.0
-    }
-
-    /// フラクタルノイズ（複数オクターブ合成）
-    pub fn fractal_2d(&self, x: f64, y: f64, config: &NoiseConfig) -> f64 {
-        let mut value = 0.0;
-        let mut amplitude = 1.0;
-        let mut frequency = 1.0;
-        let mut max_amplitude = 0.0;
-
-        for _ in 0..config.octaves {
-            let nx = x * frequency;
-            let ny = y * frequency;
-
-            let n = if config.anisotropy > 0.0 {
-                let ax = nx;
-                let ay = ny * (1.0 + config.anisotropy);
-                self.sample_2d(ax, ay, config.noise_type)
-            } else {
-                self.sample_2d(nx, ny, config.noise_type)
-            };
-
-            value += n * amplitude;
-            max_amplitude += amplitude;
-            amplitude *= config.persistence;
-            frequency *= config.lacunarity;
-        }
-
-        value / max_amplitude
-    }
-
-    fn sample_2d(&self, x: f64, y: f64, noise_type: NoiseType) -> f64 {
-        match noise_type {
-            NoiseType::Perlin => self.perlin_2d(x, y),
-            NoiseType::Simplex => self.simplex_2d(x, y),
-            NoiseType::Value => self.value_2d(x, y),
-            NoiseType::Wavelet => self.wavelet_2d(x, y),
-            NoiseType::GaussianSpike => self.gaussian_spike_2d(x, y),
-        }
-    }
-
-    fn wavelet_2d(&self, x: f64, y: f64) -> f64 {
-        let xi = x.floor() as i64;
-        let yi = y.floor() as i64;
-        let xf = x - xi as f64;
-        let yf = y - yi as f64;
-
-        let mut sum = 0.0;
-        for dx in -2..=2 {
-            for dy in -2..=2 {
-                let w = self.wavelet_weight(xf - dx as f64) * self.wavelet_weight(yf - dy as f64);
-                let h = self.hash_f64(xi + dx, yi + dy);
-                sum += w * h;
+    /// Evaluates over a grid, mapping lattice coordinates from physical extent.
+    ///
+    /// `frequency` is in cycles per world extent, so a `frequency` of 1 means one
+    /// full noise period across the whole world.
+    pub fn fill(&self, boundary: Boundary, frequency: f64, extent: f64) -> ScalarField {
+        let mut out = ScalarField::zeros(boundary);
+        let (w, h) = (boundary.width(), boundary.height());
+        let (sx, sy) = (frequency / extent, frequency / extent);
+        let (ox, oy) = (self.seed as f64 * 1e-9, self.seed as f64 * 2e-9);
+        for y in 0..h {
+            for x in 0..w {
+                let nx = x as f64 * sx + ox;
+                let ny = y as f64 * sy + oy;
+                out.set(x, y, self.sample(nx, ny));
             }
         }
-        sum * 2.0 - 1.0
+        out
     }
 
-    fn wavelet_weight(&self, t: f64) -> f64 {
-        let t = t.abs();
-        if t < 1.0 {
-            1.0 - (3.0 * t * t) + (2.0 * t * t * t)
-        } else if t < 2.0 {
-            let t2 = t - 1.0;
-            (1.0 - t2) * (1.0 - t2) * (1.0 - t2)
-        } else {
-            0.0
+    /// Fills with `out(x, y, noise_value)`, for stamps that need the noise value
+    /// alongside the position (feature placement).
+    pub fn fill_with(&self, boundary: Boundary, frequency: f64, extent: f64, mut f: impl FnMut(f64, f64, f64)) {
+        let (w, h) = (boundary.width(), boundary.height());
+        let (sx, sy) = (frequency / extent, frequency / extent);
+        let (ox, oy) = (self.seed as f64 * 1e-9, self.seed as f64 * 2e-9);
+        for y in 0..h {
+            for x in 0..w {
+                let nx = x as f64 * sx + ox;
+                let ny = y as f64 * sy + oy;
+                f(x as f64, y as f64, self.sample(nx, ny));
+            }
         }
     }
 
-    fn gaussian_spike_2d(&self, x: f64, y: f64) -> f64 {
-        let sigma = 0.3;
-        let r2 = x * x + y * y;
-        (-r2 / (2.0 * sigma * sigma)).exp() * 2.0 - 1.0
+    /// Adds the field into an existing one, multiplied by `gain`.
+    pub fn add_into(&self, target: &mut ScalarField, frequency: f64, extent: f64, gain: f64) {
+        let b = *target.boundary();
+        let (w, h) = (b.width(), b.height());
+        let (sx, sy) = (frequency / extent, frequency / extent);
+        let (ox, oy) = (self.seed as f64 * 1e-9, self.seed as f64 * 2e-9);
+        for y in 0..h {
+            for x in 0..w {
+                let n = self.sample(x as f64 * sx + ox, y as f64 * sy + oy);
+                let i = b.index(x, y);
+                target.as_mut_slice()[i] += n * gain;
+            }
+        }
+    }
+}
+
+/// Maps a noise kind to its seed domain so the kinds do not correlate.
+const fn domain_for(kind: NoiseKind) -> u64 {
+    match kind {
+        NoiseKind::Perlin => domain::NOISE_PERLIN,
+        NoiseKind::Simplex => domain::NOISE_SIMPLEX,
+        NoiseKind::Value => domain::NOISE_VALUE,
+        NoiseKind::Wavelet => domain::NOISE_WAVELET,
+        NoiseKind::GaussianSpike => domain::NOISE_WAVELET ^ 0xF0,
+    }
+}
+
+/// Convenience: normalised coordinates within a grid cell, for feature stamps.
+#[inline]
+pub fn cell_norm(index: usize, boundary: &Boundary) -> (f64, f64) {
+    let (x, y) = boundary.coords(index);
+    (
+        if boundary.width() > 1 {
+            x as f64 / (boundary.width() - 1) as f64
+        } else {
+            0.5
+        },
+        if boundary.height() > 1 {
+            y as f64 / (boundary.height() - 1) as f64
+        } else {
+            0.5
+        },
+    )
+}
+
+/// Direction unit vector helper used by anisotropic feature stamps.
+pub fn direction_vector(degrees: f64) -> Vec2 {
+    Vec2::from_angle(degrees.to_radians(), 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grid::BoundaryKind;
+
+    const SEED: u64 = 0xDEAD_BEEF_CAFE;
+
+    fn range_over(kind: NoiseKind, n: usize, step: f64) -> (f64, f64) {
+        let params = NoiseParams {
+            kind,
+            octaves: 1,
+            ..Default::default()
+        };
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for i in 0..n {
+            for j in 0..n {
+                let v = sample(&params, i as f64 * step, j as f64 * step, SEED);
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+        }
+        (lo, hi)
+    }
+
+    #[test]
+    fn every_base_function_stays_in_unit_range() {
+        for kind in [
+            NoiseKind::Perlin,
+            NoiseKind::Simplex,
+            NoiseKind::Value,
+            NoiseKind::Wavelet,
+            NoiseKind::GaussianSpike,
+        ] {
+            let (lo, hi) = range_over(kind, 64, 0.37);
+            assert!(hi <= 1.0, "{kind:?} exceeds +1: {hi}");
+            if kind != NoiseKind::GaussianSpike {
+                assert!(lo >= -1.0, "{kind:?} below -1: {lo}");
+            } else {
+                // The spike field is a non-negative mask by contract.
+                assert!(lo >= 0.0, "{kind:?} went negative: {lo}");
+            }
+        }
+    }
+
+    #[test]
+    fn base_functions_are_deterministic() {
+        for kind in [
+            NoiseKind::Perlin,
+            NoiseKind::Simplex,
+            NoiseKind::Value,
+            NoiseKind::Wavelet,
+        ] {
+            let a = perlin_or(kind, 1.7, 2.3, SEED);
+            let b = perlin_or(kind, 1.7, 2.3, SEED);
+            assert_eq!(a, b, "{kind:?} is not deterministic");
+        }
+    }
+
+    fn perlin_or(kind: NoiseKind, x: f64, y: f64, seed: u64) -> f64 {
+        match kind {
+            NoiseKind::Perlin => perlin_2d(x, y, seed),
+            NoiseKind::Simplex => simplex_2d(x, y, seed),
+            NoiseKind::Value => value_2d(x, y, seed),
+            NoiseKind::Wavelet => wavelet_2d(x, y, seed, 3),
+            NoiseKind::GaussianSpike => gaussian_spike_2d(x, y, seed, 0.25, 0.5),
+        }
+    }
+
+    #[test]
+    fn different_seeds_give_different_fields() {
+        let p = NoiseParams::default();
+        // Sample off-lattice and away from y=0: exactly on a lattice row the
+        // y-gradient term drops out and only a handful of distinct x-gradients
+        // remain, so collisions there are expected rather than a seeding fault.
+        let mut diffs = 0;
+        for i in 0..32 {
+            let (x, y) = (i as f64 * 0.317 + 0.041, i as f64 * 0.193 + 0.077);
+            if sample(&p, x, y, 1) != sample(&p, x, y, 2) {
+                diffs += 1;
+            }
+        }
+        assert_eq!(diffs, 32, "seed barely changes the field");
+    }
+
+#[test]
+    fn noise_is_continuous_within_a_seed() {
+        // The differential of a single seed's field must stay bounded: sampling
+        // at ever finer steps may not produce ever-larger per-unit gradients,
+        // which is the signature of an actual discontinuity.
+        let p = NoiseParams {
+            octaves: 3,
+            ..Default::default()
+        };
+        for step in [1e-2f64, 1e-3, 1e-4] {
+            let n = (2.0 / step) as usize;
+            let mut max_slope = 0.0f64;
+            let mut i = 1;
+            while (i as f64 * step) < 2.0 {
+                let x = i as f64 * step;
+                let a = sample(&p, x, 0.37, SEED);
+                let b = sample(&p, x + step, 0.37, SEED);
+                max_slope = max_slope.max((a - b).abs() / step);
+                i += 1;
+            }
+            assert!(n > 0);
+            assert!(max_slope < 20.0, "step {step}: slope {max_slope} is unbounded");
+        }
+    }
+
+    #[test]
+    fn noise_differs_between_seeds_but_both_stay_bounded() {
+        // Changing the seed must change the surface, and the change must still
+        // be a smooth surface rather than white noise.
+        let p = NoiseParams {
+            octaves: 4,
+            ..Default::default()
+        };
+        let mut max_slope = 0.0f64;
+        for seed in [1u64, 2] {
+            for i in 0..400 {
+                let x = i as f64 * 0.005;
+                let a = sample(&p, x, 0.37, seed);
+                let b = sample(&p, x + 0.005, 0.37, seed);
+                max_slope = max_slope.max((a - b).abs() / 0.005);
+            }
+        }
+        assert!(max_slope < 20.0, "seeded field is not smooth: {max_slope}");
+    }
+
+    #[test]
+    fn noise_is_roughly_zero_mean() {
+        for kind in [NoiseKind::Perlin, NoiseKind::Simplex, NoiseKind::Value] {
+            let params = NoiseParams {
+                kind,
+                octaves: 1,
+                ..Default::default()
+            };
+            let mut sum = 0.0;
+            let n = 100.0;
+            let mut count = 0.0;
+            for i in 0..80 {
+                for j in 0..80 {
+                    sum += sample(&params, i as f64 * n, j as f64 * n, SEED);
+                    count += 1.0;
+                }
+            }
+            let mean = sum / count;
+            assert!(mean.abs() < 0.12, "{kind:?} mean {mean}");
+        }
+    }
+
+    #[test]
+    fn noise_has_no_dc_grid_bias() {
+        // Averaging over a single lattice period should be near zero; a large
+        // bias would show up as a visible cross-hatch on the terrain.
+        let params = NoiseParams {
+            kind: NoiseKind::Perlin,
+            octaves: 1,
+            ..Default::default()
+        };
+        let mut x_bias = 0.0;
+        let mut y_bias = 0.0;
+        let n = 40;
+        for i in 0..n {
+            for j in 0..n {
+                x_bias += sample(&params, i as f64, j as f64, SEED);
+                y_bias += sample(&params, j as f64, i as f64, SEED);
+            }
+        }
+        let total = (n * n) as f64;
+        assert!(x_bias / total < 0.15);
+        assert!(y_bias / total < 0.15);
+    }
+
+    #[test]
+    fn perlin_is_zero_at_lattice_points() {
+        // Gradient noise is exactly 0 on integer lattice points (each corner
+        // contributes zero because the offset is zero there).
+        for i in 0..8 {
+            for j in 0..8 {
+                let v = perlin_2d(i as f64, j as f64, SEED);
+                assert!(v.abs() < 1e-9, "perlin({i},{j}) = {v}");
+            }
+        }
+    }
+
+    #[test]
+    fn perlin_is_continuous() {
+        let eps = 1e-6;
+        for i in 0..8 {
+            for j in 0..8 {
+                let (x, y) = (i as f64 + 0.5, j as f64 + 0.5);
+                let a = perlin_2d(x, y, SEED);
+                let b = perlin_2d(x + eps, y + eps, SEED);
+                assert!((a - b).abs() < 0.05, "discontinuity at {x},{y}");
+            }
+        }
+    }
+
+    #[test]
+    fn noise_gradients_are_statistically_isotropic() {
+        // A real property every 2D noise function should have: over many
+        // samples the mean of gx*gy is ~0 and mean(gx^2) ~= mean(gy^2). A
+        // gradient set weighted toward the coordinate axes fails the second
+        // condition, which is exactly the artefact this guards against.
+        for kind in [NoiseKind::Perlin, NoiseKind::Simplex, NoiseKind::Value] {
+            let params = NoiseParams {
+                kind,
+                octaves: 1,
+                ..Default::default()
+            };
+            let eps = 1e-4;
+            let (mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0);
+            let n = 200;
+            for i in 0..n {
+                for j in 0..n {
+                    let (x, y) = (i as f64 * 0.137 + 0.019, j as f64 * 0.211 + 0.043);
+                    let gx = (sample(&params, x + eps, y, SEED) - sample(&params, x - eps, y, SEED))
+                        / (2.0 * eps);
+                    let gy = (sample(&params, x, y + eps, SEED) - sample(&params, x, y - eps, SEED))
+                        / (2.0 * eps);
+                    sxx += gx * gx;
+                    syy += gy * gy;
+                    sxy += gx * gy;
+                }
+            }
+            let count = (n * n) as f64;
+            let (mxx, myy, mxy) = (sxx / count, syy / count, sxy / count);
+            let ratio = mxx / myy;
+            assert!(
+                (0.75..1.33).contains(&ratio),
+                "{kind:?} axis anisotropy: gx²/gy² = {ratio}"
+            );
+            assert!(
+                mxy.abs() < 0.15 * (mxx * myy).sqrt(),
+                "{kind:?} gradient correlation {mxy}"
+            );
+        }
+    }
+
+    #[test]
+    fn fractal_amplitude_does_not_explode_with_octaves() {
+        for octaves in [1u32, 4, 8, 16] {
+            let params = NoiseParams {
+                octaves,
+                ..Default::default()
+            };
+            let mut hi = f64::NEG_INFINITY;
+            let mut lo = f64::INFINITY;
+            for i in 0..64 {
+                for j in 0..64 {
+                    let v = sample(&params, i as f64 * 0.21, j as f64 * 0.21, SEED);
+                    hi = hi.max(v);
+                    lo = lo.min(v);
+                }
+            }
+            assert!(hi <= 1.0 && lo >= -1.0, "octaves={octaves}: {lo}..{hi}");
+        }
+    }
+
+    #[test]
+    fn more_octaves_add_detail() {
+        // The coarse standard deviation of a 1-octave field should exceed that
+        // of a 1-octave field sampled at higher frequency (more detail = smaller
+        // dominant feature = lower local variance at coarse scale).
+        let coarse = NoiseParams {
+            octaves: 1,
+            ..Default::default()
+        };
+        let fine = NoiseParams {
+            octaves: 8,
+            ..Default::default()
+        };
+        let c = std_dev_field(&coarse, 8.0);
+        let f = std_dev_field(&fine, 8.0);
+        assert!(f < c, "8 octaves ({f}) should be rougher than 1 ({c})");
+    }
+
+    fn std_dev_field(params: &NoiseParams, freq: f64) -> f64 {
+        let mut vals = Vec::new();
+        for i in 0..40 {
+            for j in 0..40 {
+                vals.push(sample(params, i as f64 / 40.0 * freq, j as f64 / 40.0 * freq, SEED));
+            }
+        }
+        let m = vals.iter().sum::<f64>() / vals.len() as f64;
+        (vals.iter().map(|v| (v - m).powi(2)).sum::<f64>() / vals.len() as f64).sqrt()
+    }
+
+    #[test]
+    fn anisotropy_stretches_features_along_its_axis() {
+        // Measure how far the field changes over a fixed displacement. Stretched
+        // along the principal axis means the field changes *less* per unit
+        // displacement there, so the RMS difference along must be the smaller one.
+        let aniso = NoiseParams {
+            octaves: 4,
+            anisotropy: Anisotropy {
+                amount: 1.0,
+                direction: 0.0, // stretch along +x
+            },
+            ..Default::default()
+        };
+        let along = rms_difference(&aniso, (1.0, 0.0));
+        let across = rms_difference(&aniso, (0.0, 1.0));
+        assert!(
+            along < across,
+            "anisotropic field should vary slower along its axis (along {along}, across {across})"
+        );
+    }
+
+    #[test]
+    fn isotropic_anisotropy_matches_itself_on_both_axes() {
+        let iso = NoiseParams {
+            octaves: 4,
+            ..Default::default()
+        };
+        let along = rms_difference(&iso, (1.0, 0.0));
+        let across = rms_difference(&iso, (0.0, 1.0));
+        // No preferred axis, so the two must be statistically comparable.
+        let ratio = along / across;
+        assert!(ratio > 0.6 && ratio < 1.7, "isotropic ratio {ratio}");
+    }
+
+    /// RMS of `f(p + d) - f(p)` over a grid of sample points.
+    fn rms_difference(params: &NoiseParams, d: (f64, f64)) -> f64 {
+        let mut sum = 0.0;
+        let n = 60;
+        for i in 0..n {
+            for j in 0..n {
+                let (x, y) = (i as f64 / n as f64 * 6.0, j as f64 / n as f64 * 6.0);
+                let delta = sample(params, x, y, SEED) - sample(params, x + d.0, y + d.1, SEED);
+                sum += delta * delta;
+            }
+        }
+        (sum / (n * n) as f64).sqrt()
+    }
+
+    #[test]
+    fn isotropic_anisotropy_is_a_no_op() {
+        let a = Anisotropy::default();
+        assert!(a.is_isotropic());
+        assert_eq!(a.warp(3.0, 5.0), (3.0, 5.0));
+    }
+
+    #[test]
+    fn domain_warping_changes_the_field_but_keeps_range() {
+        let plain = NoiseParams {
+            octaves: 4,
+            ..Default::default()
+        };
+        let warped = NoiseParams {
+            octaves: 4,
+            warp_strength: 0.5,
+            ..Default::default()
+        };
+        let mut differs = 0;
+        for i in 0..20 {
+            for j in 0..20 {
+                let (x, y) = (i as f64 * 0.3, j as f64 * 0.3);
+                let a = sample(&plain, x, y, SEED);
+                let b = sample(&warped, x, y, SEED);
+                assert!(b.abs() <= 1.0);
+                if (a - b).abs() > 1e-9 {
+                    differs += 1;
+                }
+            }
+        }
+        assert_eq!(differs, 400, "warp had no effect");
+    }
+
+    #[test]
+    fn noise_field_fill_matches_direct_sampling() {
+        let b = Boundary::new(BoundaryKind::Rectangular, 8, 8);
+        let f = NoiseField::with_seed(NoiseParams::default(), SEED);
+        let field = f.fill(b, 8.0, 1.0);
+        // Compare against a manual evaluation at the same coordinates.
+        let (sx, sy) = (8.0 / 1.0, 8.0 / 1.0);
+        let (ox, oy) = (SEED as f64 * 1e-9, SEED as f64 * 2e-9);
+        for y in 0..8 {
+            for x in 0..8 {
+                let expect = f.sample(x as f64 * sx + ox, y as f64 * sy + oy);
+                assert!((field.get(x, y) - expect).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn noise_field_add_into_accumulates() {
+        let b = Boundary::new(BoundaryKind::Rectangular, 4, 4);
+        let f = NoiseField::with_seed(NoiseParams::default(), SEED);
+        let mut target = ScalarField::zeros(b);
+        f.add_into(&mut target, 4.0, 1.0, 10.0);
+        let once = target.clone();
+        f.add_into(&mut target, 4.0, 1.0, 10.0);
+        for i in 0..target.len() {
+            assert!((target.as_slice()[i] - 2.0 * once.as_slice()[i]).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn ridged_fractal_produces_crest_dominated_statistics() {
+        let params = NoiseParams {
+            fractal: FractalKind::Ridged,
+            octaves: 4,
+            ..Default::default()
+        };
+        let mut vals = Vec::new();
+        for i in 0..60 {
+            for j in 0..60 {
+                let v = sample(&params, i as f64 * 0.17, j as f64 * 0.19, SEED);
+                assert!(v.abs() <= 1.0, "ridged left range: {v}");
+                vals.push(v);
+            }
+        }
+        // Ridged folds |n| about zero, so the distribution must be skewed: the
+        // mean sits below the median (long tail of valleys, narrow crests).
+        let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+        let mut sorted = vals.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = sorted[sorted.len() / 2];
+        assert!(
+            mean < median,
+            "ridged should be crest-skewed: mean {mean} >= median {median}"
+        );
+    }
+
+    #[test]
+    fn billow_fractal_is_right_skewed() {
+        let billow = NoiseParams {
+            fractal: FractalKind::Billow,
+            octaves: 3,
+            ..Default::default()
+        };
+        let fbm = NoiseParams {
+            fractal: FractalKind::Fbm,
+            octaves: 3,
+            ..Default::default()
+        };
+        // `|n| - 0.5` folds the distribution about zero, so the mean rises above
+        // the median. Unfolded fBm is symmetric, where the two nearly
+        // coincide — that gap is the distinguishing property.
+        fn mean_minus_median(p: &NoiseParams) -> f64 {
+            let mut v = Vec::new();
+            for i in 0..70 {
+                for j in 0..70 {
+                    v.push(sample(p, i as f64 * 0.13, j as f64 * 0.17, SEED));
+                }
+            }
+            let mean = v.iter().sum::<f64>() / v.len() as f64;
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            mean - v[v.len() / 2]
+        }
+        let billow_skew = mean_minus_median(&billow);
+        let fbm_skew = mean_minus_median(&fbm);
+        assert!(
+            billow_skew > fbm_skew,
+            "billow ({billow_skew}) should be more right-skewed than fbm ({fbm_skew})"
+        );
+    }
+
+    #[test]
+    fn wavelet_and_perlin_differ() {
+        let w = perlin_or(NoiseKind::Wavelet, 1.3, 2.7, SEED);
+        let p = perlin_or(NoiseKind::Perlin, 1.3, 2.7, SEED);
+        assert!((w - p).abs() > 1e-6, "wavelet is identical to perlin");
+    }
+
+    #[test]
+    fn gaussian_spikes_are_localized() {
+        // With jitter, a peak can sit up to 0.15 off its lattice site, so comparing a
+        // cell against its diagonal neighbour mixes two different spikes. The
+        // contract that actually matters to features.rs is separability: a
+        // narrow spike must produce a *local maximum* surrounded by lower
+        // ground, not a plateau. Count strict interior local maxima instead.
+        let width = 0.35;
+        let mut maxima = 0;
+        let mut cells = 0;
+        for i in 1..39 {
+            for j in 1..39 {
+                let v = gaussian_spike_2d(i as f64, j as f64, SEED, 1.0, width);
+                let peak = v;
+                let mut is_max = true;
+                for (dx, dy) in [(-0.5f64, 0.0), (0.5, 0.0), (0.0, -0.5), (0.0, 0.5)] {
+                    if gaussian_spike_2d(i as f64 + dx, j as f64 + dy, SEED, 1.0, width) >= peak {
+                        is_max = false;
+                    }
+                }
+                if is_max {
+                    maxima += 1;
+                }
+                cells += 1;
+            }
+        }
+        // One maximum per lattice cell is the ideal, but jitter of +/-0.15 against a
+        // sigma of 0.35 lets a neighbour's bump occasionally dominate, so the
+        // honest bar is "a solid majority", which still cleanly separates
+        // discrete bumps from the merged plateau a saturating function produces.
+        let ratio = maxima as f64 / cells as f64;
+        assert!(ratio > 0.6, "spikes are not separable peaks: ratio {ratio}");
+    }
+
+    #[test]
+    fn gaussian_spike_density_controls_coverage() {
+        // Sparse settings must leave most of the field at zero; dense settings
+        // must cover more. This is the contract features.rs relies on to place
+        // discrete landforms rather than a continuous blanket.
+        fn coverage(density: f64) -> f64 {
+            let mut nonzero = 0;
+            let total = 120 * 120;
+            for i in 0..120 {
+                for j in 0..120 {
+                    let v = gaussian_spike_2d(
+                        i as f64 * 0.25,
+                        j as f64 * 0.25,
+                        SEED,
+                        density,
+                        0.35,
+                    );
+                    if v.abs() > 1e-3 {
+                        nonzero += 1;
+                    }
+                }
+            }
+            nonzero as f64 / total as f64
+        }
+        let sparse = coverage(0.05);
+        let dense = coverage(0.5);
+        assert!(sparse < dense, "density has no effect: {sparse} vs {dense}");
+        assert!(sparse < 0.35, "sparse spikes cover too much: {sparse}");
+    }
+
+    #[test]
+    fn octaves_lacunarity_and_persistence_are_clamped_to_spec_ranges() {
+        let params = NoiseParams {
+            octaves: 99,
+            lacunarity: 0.1,
+            persistence: 5.0,
+            ..Default::default()
+        };
+        // Should still evaluate and stay in range despite out-of-spec inputs.
+        for i in 0..16 {
+            let v = sample(&params, i as f64 * 0.3, i as f64 * 0.7, SEED);
+            assert!(v.abs() <= 1.0);
+        }
+        assert_eq!(params.octaves.clamp(1, 16), 16);
+        assert_eq!(params.lacunarity.clamp(1.0, 4.0), 1.0);
+        assert_eq!(params.persistence.clamp(0.1, 1.0), 1.0);
     }
 }
