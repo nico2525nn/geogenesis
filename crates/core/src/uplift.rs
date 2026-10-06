@@ -216,7 +216,7 @@ pub fn flexural_response(mosaic: &PlateMosaic, params: &UpliftParams) -> ScalarF
     let lambda_m = (params.flexural_rigidity_nm / rho_g).cbrt().max(1.0);
     let extent = params.spatial_extent_m.max(1.0);
     let cell_m = extent / b.width().max(1) as f64;
-    let lambda_cells = (lambda_m / cell_m).clamp(0.5, 512.0);
+    let lambda_cells = (lambda_m / cell_m).clamp(0.5, 64.0);
 
     convolve_flexural(&load, lambda_cells, params.vertical_scale_m * 0.05)
 }
@@ -225,6 +225,18 @@ pub fn flexural_response(mosaic: &PlateMosaic, params: &UpliftParams) -> ScalarF
 /// `load` is mean-removed first so a uniform load bends rather than translates the plate.
 fn convolve_flexural(load: &ScalarField, lambda_cells: f64, amplitude: f64) -> ScalarField {
     let b = *load.boundary();
+    // Empty load (no convergent boundaries, as in a single-plate world):
+    // skip the O(cells × radius) convolution entirely.
+    let mut peak = 0.0f64;
+    for &v in load.as_slice() {
+        let a = v.abs();
+        if a > peak {
+            peak = a;
+        }
+    }
+    if peak <= 0.0 || !peak.is_finite() {
+        return ScalarField::zeros(b);
+    }
     let profile = flexural_kernel(lambda_cells);
 
     let load_mean = load.mean();
@@ -261,7 +273,11 @@ fn convolve_flexural(load: &ScalarField, lambda_cells: f64, amplitude: f64) -> S
 /// Builds the flexural Green's-function profile for `lambda_cells`.
 /// Normalisation order matters: unit-gain by absolute sum first, then zero-mean.
 pub fn flexural_kernel(lambda_cells: f64) -> Vec<f64> {
-    let lambda_cells = lambda_cells.clamp(0.5, 512.0);
+    // Clamp the wavelength to the grid: a kernel wider than the domain
+    // degenerates into a global offset plus noise, at O(cells × radius) cost.
+    // A wavelength above ~1/8 of the grid carries no resolvable structure, so
+    // cap there and document the saturation instead of convolving the void.
+    let lambda_cells = lambda_cells.clamp(0.5, 64.0);
     let radius = (lambda_cells * 4.0).ceil().max(1.0) as i64;
     let span = (2 * radius + 1) as usize;
     let mut profile = vec![0.0f64; span];
@@ -450,12 +466,11 @@ mod tests {
     }
 
     fn two_plate_mosaic(b: Boundary, va: Vec2, vb: Vec2) -> PlateMosaic {
-        let sites = vec![
+        let sites = [
             Vec2::new(0.25, 0.5),
             Vec2::new(0.75, 0.5),
         ];
-        let labels = LabelField::filled(b, 0);
-        let mut labels = labels;
+        let mut labels = LabelField::filled(b, 0);
         for y in 0..b.height() {
             for x in 0..b.width() {
                 labels.set(x, y, if x < b.width() / 2 { 0 } else { 1 });

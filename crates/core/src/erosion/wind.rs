@@ -58,6 +58,18 @@ pub fn apply(
     cell_size_m: f64,
     dt_yr: f64,
 ) -> MassBalance {
+    apply_with_order(surface, params, vegetation, cell_size_m, dt_yr, None)
+}
+
+/// Applies one interval, reusing the caller's downhill order when given.
+pub fn apply_with_order(
+    surface: &mut ScalarField,
+    params: &WindParams,
+    vegetation: &ScalarField,
+    cell_size_m: f64,
+    dt_yr: f64,
+    order: Option<&[usize]>,
+) -> MassBalance {
     let b = *surface.boundary();
     let dt = dt_yr.max(0.0);
     let mut balance = MassBalance::default();
@@ -82,10 +94,20 @@ pub fn apply(
     let fetch = (8.0 * 1000.0 / cell_size_m.max(1.0)).ceil() as usize;
     let fetch = fetch.clamp(2, 32);
 
-    let order = crate::hydrology::accumulation_order(surface);
+    // Wind transport runs upwind-to-downwind, not downhill; the shared order
+    // is still a valid visitation because every cell is visited exactly once
+    // and deposition targets are resolved geometrically below.
+    let owned;
+    let visit: &[usize] = match order {
+        Some(o) => o,
+        None => {
+            owned = crate::hydrology::accumulation_order(surface);
+            &owned
+        }
+    };
     let mut suspended = vec![0.0f64; b.cell_count()];
 
-    for &idx in &order {
+    for &idx in visit {
         let (x, y) = b.coords(idx);
         let cover = vegetation.get_index(idx).clamp(0.0, 1.0);
         let local_excess = (params.wind_speed_ms * (1.0 - 0.5 * cover) - threshold).max(0.0);

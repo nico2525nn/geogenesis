@@ -405,6 +405,10 @@ pub fn apply_feature(b: Boundary, p: &StampParams) -> ScalarField {
 }
 
 pub fn stamp_into(target: &mut ScalarField, p: &StampParams, weight: f64) {
+    // One full-grid temporary per stamp; ~24 stamps per world. Bounding-box
+    // writes would halve the traffic, but each stamp already writes only its
+    // own box — the add-assign loop below is the only full-grid pass, and it
+    // is memory-bound, not compute-bound.
     let b = *target.boundary();
     let field = apply_feature(b, p);
     for (a, v) in target.as_mut_slice().iter_mut().zip(field.as_slice()) {

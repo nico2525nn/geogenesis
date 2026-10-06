@@ -130,6 +130,7 @@ fn quintic(t: f64) -> f64 {
 ///
 /// Discrete directions from a hash keep results bit-identical across platforms.
 #[inline]
+#[allow(clippy::approx_constant)]
 fn gradient_from_hash(h: u64) -> (f64, f64) {
     // Precomputed cos/sin of 22.5° multiples; avoids `cos` in the hot loop.
     const DIRS: [(f64, f64); 16] = [

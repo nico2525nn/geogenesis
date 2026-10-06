@@ -308,12 +308,11 @@ pub fn accumulate_flow_with_neighbors(
             continue;
         }
         let (x, y) = b.coords(idx);
-        for d in 0..8 {
+        for (d, &(dx, dy)) in D8_OFFSETS.iter().enumerate() {
             let f = routing.fraction[idx * 8 + d];
             if f <= 0.0 {
                 continue;
             }
-            let (dx, dy) = D8_OFFSETS[d];
             let nidx = b.index_wrapped(x as i64 + dx, y as i64 + dy);
             acc[nidx] += f * (acc[idx] + 1.0);
         }
@@ -398,9 +397,9 @@ pub fn channel_network(acc: &[f64], b: Boundary, min_area_cells: f64) -> LabelFi
 /// Total drainage leaving the grid; equals the cell count with no sinks.
 pub fn total_drainage(acc: &[f64], routing: &FlowRouting, b: Boundary) -> f64 {
     let mut sum = 0.0;
-    for idx in 0..b.cell_count() {
+    for (idx, &a) in acc.iter().enumerate().take(b.cell_count()) {
         if routing.total_out[idx] <= 0.0 {
-            sum += acc[idx] + 1.0;
+            sum += a + 1.0;
         }
     }
     sum

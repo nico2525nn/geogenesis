@@ -203,6 +203,19 @@ pub fn classify_biome(
     }
 }
 
+/// Inputs for [`compute_climate`], grouped so the driver passes one struct.
+#[derive(Debug)]
+pub struct ClimateInputs<'a> {
+    pub elevation: &'a ScalarField,
+    pub soil_m: &'a ScalarField,
+    pub climate: &'a ClimateParams,
+    pub vegetation: &'a VegetationParams,
+    pub rain: &'a RainfallParams,
+    pub seed: u64,
+    pub cell_size_m: f64,
+    pub lapse_c_km: f64,
+}
+
 /// Full climate state: temperature, precipitation, vegetation cover, biomes.
 #[derive(Debug, Clone)]
 pub struct Climate {
@@ -213,19 +226,20 @@ pub struct Climate {
 }
 
 /// Computes climate from elevation, soils and parameters.
-pub fn compute_climate(
-    elevation: &ScalarField,
-    soil_m: &ScalarField,
-    climate: &ClimateParams,
-    vegetation: &VegetationParams,
-    rain: &RainfallParams,
-    seed: u64,
-    cell_size_m: f64,
-    lapse_c_km: f64,
-) -> Climate {
-    let b = *elevation.boundary();
-    let temperature_c = temperature_field(elevation, climate, lapse_c_km, cell_size_m);
-    let precipitation_mm = precipitation(elevation, rain, seed, cell_size_m);
+pub fn compute_climate(inputs: &ClimateInputs) -> Climate {
+    let b = *inputs.elevation.boundary();
+    let temperature_c = temperature_field(
+        inputs.elevation,
+        inputs.climate,
+        inputs.lapse_c_km,
+        inputs.cell_size_m,
+    );
+    let precipitation_mm = precipitation(
+        inputs.elevation,
+        inputs.rain,
+        inputs.seed,
+        inputs.cell_size_m,
+    );
 
     let mut veg = ScalarField::zeros(b);
     let mut biomes = LabelField::filled(b, Biome::IceCap as u32);
@@ -233,13 +247,23 @@ pub fn compute_climate(
         let t = temperature_c.get_index(i);
         let r = precipitation_mm.get_index(i);
         let (x, y) = b.coords(i);
-        let biome = classify_biome(t, r, elevation.get(x, y), soil_m.get_index(i));
+        let biome = classify_biome(
+            t,
+            r,
+            inputs.elevation.get(x, y),
+            inputs.soil_m.get_index(i),
+        );
         biomes.set_index(i, biome as u32);
-        // Cover follows the biome and the baseline density, with thin soil
-        // limiting establishment.
         let climax = biome_cover(biome);
-        let soil_limit = clamp(soil_m.get_index(i) / 0.5, 0.15, 1.0);
-        veg.set_index(i, clamp(vegetation.density * climax * soil_limit, 0.0, 1.0));
+        let soil_limit = clamp(inputs.soil_m.get_index(i) / 0.5, 0.15, 1.0);
+        veg.set_index(
+            i,
+            clamp(
+                inputs.vegetation.density * climax * soil_limit,
+                0.0,
+                1.0,
+            ),
+        );
     }
 
     Climate {
@@ -369,16 +393,17 @@ mod tests {
             }
         }
         let soil = ScalarField::filled(b, 2.0);
-        let c = compute_climate(
-            &z,
-            &soil,
-            &ClimateParams::default(),
-            &VegetationParams::default(),
-            &crate::erosion::rainfall::RainfallParams::default(),
-            7,
-            100.0,
-            6.5,
-        );
+        let inputs = ClimateInputs {
+            elevation: &z,
+            soil_m: &soil,
+            climate: &ClimateParams::default(),
+            vegetation: &VegetationParams::default(),
+            rain: &crate::erosion::rainfall::RainfallParams::default(),
+            seed: 7,
+            cell_size_m: 100.0,
+            lapse_c_km: 6.5,
+        };
+        let c = compute_climate(&inputs);
         assert_eq!(c.temperature_c.non_finite_count(), 0);
         assert_eq!(c.precipitation_mm.non_finite_count(), 0);
         assert!(c.vegetation.min() >= 0.0 && c.vegetation.max() <= 1.0);
@@ -406,8 +431,28 @@ mod tests {
             annual_mm: 150.0,
             ..Default::default()
         };
-        let wet = compute_climate(&z, &soil, &ClimateParams::default(), &VegetationParams::default(), &wet_rain, 1, 100.0, 6.5);
-        let dry = compute_climate(&z, &soil, &ClimateParams::default(), &VegetationParams::default(), &dry_rain, 1, 100.0, 6.5);
+        let climate = ClimateParams::default();
+        let vegetation = VegetationParams::default();
+        let wet = compute_climate(&ClimateInputs {
+            elevation: &z,
+            soil_m: &soil,
+            climate: &climate,
+            vegetation: &vegetation,
+            rain: &wet_rain,
+            seed: 1,
+            cell_size_m: 100.0,
+            lapse_c_km: 6.5,
+        });
+        let dry = compute_climate(&ClimateInputs {
+            elevation: &z,
+            soil_m: &soil,
+            climate: &climate,
+            vegetation: &vegetation,
+            rain: &dry_rain,
+            seed: 1,
+            cell_size_m: 100.0,
+            lapse_c_km: 6.5,
+        });
         assert!(wet.vegetation.mean() > dry.vegetation.mean());
     }
 }

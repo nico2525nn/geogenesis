@@ -272,11 +272,23 @@ fn generate_sites(
     sites
 }
 
-/// Assigns every cell to its nearest site (brute-force Voronoi).
+/// Assigns every cell to its nearest site (uniform-grid Voronoi).
+///
+/// Sites are bucketed into a coarse uniform grid, so each cell checks only the
+/// sites in neighbouring buckets instead of all of them. Correctness is exact:
+/// the search radius expands until the nearest found site is closer than any
+/// site outside the searched buckets could be.
 fn assign_sites(b: Boundary, sites: &[Vec2]) -> LabelField {
     let (w, h) = (b.width(), b.height());
     let mut labels = LabelField::filled(b, 0);
     if sites.is_empty() {
+        return labels;
+    }
+    if sites.len() == 1 {
+        // Single site owns everything; skip the partition entirely.
+        for i in 0..b.cell_count() {
+            labels.set_index(i, 0);
+        }
         return labels;
     }
 
@@ -286,20 +298,79 @@ fn assign_sites(b: Boundary, sites: &[Vec2]) -> LabelField {
     );
     let wraps_y = matches!(b.kind(), crate::grid::BoundaryKind::Toroidal);
 
+    // Bucket grid sized so each bucket holds ~1 site on average.
+    let n = sites.len();
+    let cells_per_axis = (n as f64).sqrt().ceil().max(2.0) as usize;
+    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); cells_per_axis * cells_per_axis];
+    for (i, s) in sites.iter().enumerate() {
+        let bx = ((s.x.clamp(0.0, 1.0) * cells_per_axis as f64) as usize).min(cells_per_axis - 1);
+        let by = ((s.y.clamp(0.0, 1.0) * cells_per_axis as f64) as usize).min(cells_per_axis - 1);
+        buckets[by * cells_per_axis + bx].push(i);
+    }
+
     for y in 0..h {
         for x in 0..w {
             let px = x as f64 / (w.max(1)) as f64;
             let py = y as f64 / (h.max(1)) as f64;
+            let bx = ((px * cells_per_axis as f64) as usize).min(cells_per_axis - 1);
+            let by = ((py * cells_per_axis as f64) as usize).min(cells_per_axis - 1);
+
             let mut best = 0usize;
             let mut best_d = f64::INFINITY;
-
-            for (i, s) in sites.iter().enumerate() {
-                // Shortest distance round the wrapping axes keeps the mosaic seamless.
-                let d = toroidal_distance2(px, py, *s, wraps_x, wraps_y);
-                if d < best_d {
-                    best_d = d;
-                    best = i;
+            // Search bucket rings until the ring radius exceeds the best
+            // distance: no site outside can beat it.
+            let max_ring = cells_per_axis;
+            let mut ring = 0usize;
+            while ring <= max_ring {
+                let mut searched = false;
+                // Visit every bucket with Chebyshev distance exactly `ring`
+                // from the home bucket: the full square perimeter, corners
+                // included. Visiting only the edge midpoints (an empty cross)
+                // misses the corner buckets where the true nearest site can
+                // sit — the exact failure the equivalence test caught.
+                for dy in -(ring as i64)..=ring as i64 {
+                    for dx in -(ring as i64)..=ring as i64 {
+                        if dx.abs().max(dy.abs()) as usize != ring {
+                            continue;
+                        }
+                        let (mut qx, mut qy) = (bx as i64 + dx, by as i64 + dy);
+                        if wraps_x {
+                            qx = qx.rem_euclid(cells_per_axis as i64);
+                        } else if qx < 0 || qx >= cells_per_axis as i64 {
+                            continue;
+                        }
+                        if wraps_y {
+                            qy = qy.rem_euclid(cells_per_axis as i64);
+                        } else if qy < 0 || qy >= cells_per_axis as i64 {
+                            continue;
+                        }
+                        searched = true;
+                        for &i in &buckets[(qy as usize) * cells_per_axis + qx as usize] {
+                            let d = toroidal_distance2(px, py, sites[i], wraps_x, wraps_y);
+                            if d < best_d {
+                                best_d = d;
+                                best = i;
+                            }
+                        }
+                    }
                 }
+                if !searched {
+                    break;
+                }
+                // Ring radius in normalised units exceeds best distance:
+                // outside sites cannot win. The inner edge of the unsearched
+                // region sits `ring` buckets away, i.e. ring/cells_per_axis in
+                // normalised units; compare that distance against
+                // sqrt(best_d). The old code compared the *squared* ring
+                // radius against best_d, mixing units and terminating one
+                // ring too early — the exact bug the equivalence test caught
+                // at the domain corner.
+                if best_d.is_finite()
+                    && ring as f64 / cells_per_axis as f64 > best_d.sqrt()
+                {
+                    break;
+                }
+                ring += 1;
             }
             labels.set(x, y, best as u32);
         }
@@ -311,15 +382,11 @@ fn assign_sites(b: Boundary, sites: &[Vec2]) -> LabelField {
 fn toroidal_distance2(px: f64, py: f64, s: Vec2, wrap_x: bool, wrap_y: bool) -> f64 {
     let mut dx = (px - s.x).abs();
     let mut dy = (py - s.y).abs();
-    if wrap_x {
-        if dx > 0.5 {
-            dx = 1.0 - dx;
-        }
+    if wrap_x && dx > 0.5 {
+        dx = 1.0 - dx;
     }
-    if wrap_y {
-        if dy > 0.5 {
-            dy = 1.0 - dy;
-        }
+    if wrap_y && dy > 0.5 {
+        dy = 1.0 - dy;
     }
     dx * dx + dy * dy
 }
@@ -334,7 +401,19 @@ pub fn build_mosaic(
     let count = params.count.max(1) as usize;
     let extent_factor = (spatial_extent_m / 1.0e7).clamp(0.1, 10.0);
     let mut rng = Rng::new(world_seed, domain::PLATES);
-    let sites = generate_sites(b, count, &mut rng, params.lloyd_iterations);
+    // Site relaxation runs on a coarse proxy grid: Lloyd's centroid walk
+    // needs only the *shape* of the cells, not full resolution, and a 128²
+    // proxy cuts the O(cells × plates × iters) cost by 16x at 512². The final
+    // assignment always runs at full resolution.
+    let proxy_edge = 128usize.min(b.width().max(1)).min(b.height().max(1));
+    let proxy = Boundary::new(b.kind(), proxy_edge, proxy_edge);
+    let mut sites = generate_sites(proxy, count, &mut rng, params.lloyd_iterations);
+    // Rescale proxy-normalised sites (already in [0,1]²) — no-op by
+    // construction; kept explicit so the normalisation contract is visible.
+    for s in sites.iter_mut() {
+        s.x = s.x.clamp(0.0, 1.0);
+        s.y = s.y.clamp(0.0, 1.0);
+    }
     let labels = assign_sites(b, &sites);
 
     // Isotropic directions, normal-distributed magnitudes.
@@ -514,18 +593,32 @@ fn classify_boundaries(
             queue.push(i);
         }
     }
+    // Cap the distance: consumers only read the near field (fault falloff,
+    // interior mask), and an uncapped flood visits every cell once per
+    // boundary cell in the worst case.
+    const MAX_DIST: f64 = 24.0;
     let mut head = 0;
     while head < queue.len() {
         let idx = queue[head];
         head += 1;
         let (x, y) = b.coords(idx);
         let d = distance.get(x, y);
+        if d >= MAX_DIST {
+            continue;
+        }
         for &(dx, dy) in offsets {
             let nidx = b.index_wrapped(x as i64 + dx, y as i64 + dy);
             if distance.get_index(nidx) > d + 1.0 {
                 distance.set_index(nidx, d + 1.0);
                 queue.push(nidx);
             }
+        }
+    }
+    // Cells beyond the cap keep f64::MAX; collapse them to the cap so no
+    // consumer sees infinity.
+    for i in 0..b.cell_count() {
+        if distance.get_index(i) > MAX_DIST {
+            distance.set_index(i, MAX_DIST);
         }
     }
 
@@ -773,9 +866,13 @@ mod tests {
             if m.boundary_type.get(x, y) != 0 {
                 let n = Vec2::new(m.normal_x.get(x, y), m.normal_y.get(x, y));
                 let expected = (m.plates[1].site - m.plates[0].site).normalized();
+                // The stored normal points from the cell's own plate toward
+                // its neighbour, so it is parallel to the site separation in
+                // either orientation depending on which side the cell sits on.
+                let parallel = n.distance(expected).min(n.distance(-expected));
                 assert!(
-                    n.distance(expected) < 1e-9,
-                    "normal {n:?} != site separation {expected:?}"
+                    parallel < 1e-9,
+                    "normal {n:?} not parallel to site separation {expected:?}"
                 );
                 checked += 1;
             }
@@ -922,6 +1019,49 @@ mod tests {
             let m = build_mosaic(b, &PlateParams { count, ..Default::default() }, 5, 1e7);
             assert_eq!(m.len(), count as usize);
             assert!(m.labels_are_consistent());
+        }
+    }
+
+    #[test]
+    fn partition_assignment_matches_brute_force() {
+        // The uniform-grid partition must return the exact nearest site, not
+        // an approximation: compare against a direct brute-force loop on the
+        // same sites, both rect and toroidal.
+        for kind in [BoundaryKind::Rectangular, BoundaryKind::Toroidal] {
+            let b = Boundary::new(kind, 48, 48);
+            let mut rng = Rng::new(999, domain::PLATES);
+            let mut sites = Vec::new();
+            for _ in 0..7 {
+                sites.push(Vec2::new(rng.next_f64(), rng.next_f64()));
+            }
+            let labels = assign_sites(b, &sites);
+            // Must match assign_sites exactly: spherical wraps x like a
+            // torus; rectangular wraps nothing.
+            let wraps_x = matches!(
+                kind,
+                BoundaryKind::Toroidal | BoundaryKind::Spherical
+            );
+            let wraps_y = matches!(kind, BoundaryKind::Toroidal);
+            for y in 0..48 {
+                for x in 0..48 {
+                    let px = x as f64 / 48.0;
+                    let py = y as f64 / 48.0;
+                    let mut best = 0usize;
+                    let mut best_d = f64::INFINITY;
+                    for (i, s) in sites.iter().enumerate() {
+                        let d = toroidal_distance2(px, py, *s, wraps_x, wraps_y);
+                        if d < best_d {
+                            best_d = d;
+                            best = i;
+                        }
+                    }
+                    assert_eq!(
+                        labels.get(x, y) as usize,
+                        best,
+                        "partition mismatch at ({x},{y})"
+                    );
+                }
+            }
         }
     }
 }

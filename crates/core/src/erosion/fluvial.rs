@@ -95,16 +95,36 @@ pub fn build_state(
     cell_size_m: f64,
     runoff_mm_yr: &ScalarField,
 ) -> FluvialState {
+    build_state_with_order(surface, params, cell_size_m, runoff_mm_yr, None)
+}
+
+/// Builds routing, reusing the caller's order when given.
+pub fn build_state_with_order(
+    surface: &ScalarField,
+    params: &FluvialParams,
+    cell_size_m: f64,
+    runoff_mm_yr: &ScalarField,
+    order: Option<&[usize]>,
+) -> FluvialState {
     let (filled, routing, order, acc_m2) = if params.use_mfd {
         let (filled, routing, acc) =
             condition_mfd(surface, cell_size_m, 1.1, cell_epsilon(cell_size_m));
-        let order = crate::hydrology::accumulation_order(&filled);
+        // Skip the internal sort when the caller already supplies an order:
+        // condition_* returns the accumulation, and the visitation order is
+        // only needed for the sediment pass below.
+        let order = match order {
+            Some(o) => o.to_vec(),
+            None => crate::hydrology::accumulation_order(&filled),
+        };
         let acc_m2 = scale_area(acc, cell_size_m, runoff_mm_yr);
         (filled, routing, order, acc_m2)
     } else {
         let (filled, routing, acc) =
             condition_d8(surface, cell_size_m, cell_epsilon(cell_size_m));
-        let order = crate::hydrology::accumulation_order(&filled);
+        let order = match order {
+            Some(o) => o.to_vec(),
+            None => crate::hydrology::accumulation_order(&filled),
+        };
         let acc_m2 = scale_area(acc, cell_size_m, runoff_mm_yr);
         (filled, routing, order, acc_m2)
     };
@@ -156,8 +176,8 @@ fn scale_area(
     } else {
         0.0
     } / 1000.0; // mm -> m
-    for i in 0..b.cell_count() {
-        out.set_index(i, (acc_cells[i] + 1.0) * base * uniform.max(0.0));
+    for (i, acc) in acc_cells.iter().enumerate().take(b.cell_count()) {
+        out.set_index(i, (acc + 1.0) * base * uniform.max(0.0));
     }
     out
 }
@@ -221,13 +241,39 @@ pub fn apply(
     soil_thickness_m: &ScalarField,
     erodibility: &ScalarField,
 ) -> MassBalance {
+    apply_with_order(
+        surface,
+        params,
+        cell_size_m,
+        dt_yr,
+        runoff_mm_yr,
+        soil_thickness_m,
+        erodibility,
+        None,
+    )
+}
+
+/// Applies one interval, reusing the caller's downhill order when given.
+///
+/// Passing `Some(order)` skips the internal sort; the order must be a valid
+/// descending-elevation visitation of the *current* surface.
+pub fn apply_with_order(
+    surface: &mut ScalarField,
+    params: &FluvialParams,
+    cell_size_m: f64,
+    dt_yr: f64,
+    runoff_mm_yr: &ScalarField,
+    soil_thickness_m: &ScalarField,
+    erodibility: &ScalarField,
+    order: Option<&[usize]>,
+) -> MassBalance {
     let b = *surface.boundary();
     let dt = dt_yr.max(0.0);
     if dt == 0.0 {
         return MassBalance::default();
     }
 
-    let state = build_state(surface, params, cell_size_m, runoff_mm_yr);
+    let state = build_state_with_order(surface, params, cell_size_m, runoff_mm_yr, order);
     let mut balance = MassBalance::default();
     let mut suspended = vec![0.0f64; b.cell_count()];
     let m2_per_cell = cell_size_m * cell_size_m;
@@ -297,7 +343,7 @@ pub fn apply(
 /// (sheet flow, rills) and erodes less per unit discharge.
 fn channel_fraction(area_cells: f64, params: &FluvialParams) -> f64 {
     let threshold = params.min_channel_area_cells.max(1) as f64;
-    (area_cells / threshold).min(1.0).max(0.0)
+    (area_cells / threshold).clamp(0.0, 1.0)
 }
 
 /// Relief available for removal: the drop to the lowest receiving neighbour.

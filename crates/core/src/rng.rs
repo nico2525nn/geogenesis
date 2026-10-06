@@ -90,7 +90,13 @@ impl Rng {
     /// Returns a uniform value in `[low, high)`; returns `low` for an empty or inverted range.
     #[inline]
     pub fn range_f64(&mut self, low: f64, high: f64) -> f64 {
-        if !(high > low) {
+        // Degenerate or non-finite bounds return `low` (or 0 when even that is
+        // NaN) rather than panicking: callers clamp parameters, so degenerate
+        // ranges are reachable and must not abort a run.
+        if !low.is_finite() {
+            return 0.0;
+        }
+        if !high.is_finite() || high <= low {
             return low;
         }
         low + (high - low) * self.next_f64()

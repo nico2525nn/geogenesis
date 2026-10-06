@@ -97,6 +97,18 @@ pub fn apply(
     dt_yr: f64,
     accumulation_area: &ScalarField,
 ) -> MassBalance {
+    apply_with_order(surface, params, cell_size_m, dt_yr, accumulation_area, None)
+}
+
+/// Applies one interval, reusing the caller's downhill order when given.
+pub fn apply_with_order(
+    surface: &mut ScalarField,
+    params: &GlacialParams,
+    cell_size_m: f64,
+    dt_yr: f64,
+    accumulation_area: &ScalarField,
+    order: Option<&[usize]>,
+) -> MassBalance {
     let dt = dt_yr.max(0.0);
     let mut balance = MassBalance::default();
     if dt == 0.0 {
@@ -106,10 +118,17 @@ pub fn apply(
     let m2 = cell_size_m * cell_size_m;
 
     // Where the surface sits above the ELA this interval.
-    let order = crate::hydrology::accumulation_order(surface);
+    let owned;
+    let order: &[usize] = match order {
+        Some(o) => o,
+        None => {
+            owned = crate::hydrology::accumulation_order(surface);
+            &owned
+        }
+    };
     let mut ice = vec![0.0f64; b.cell_count()];
 
-    for &idx in &order {
+    for &idx in order {
         let (x, y) = b.coords(idx);
         let z = surface.get_index(idx);
         let area = accumulation_area.get_index(idx).max(m2);

@@ -198,8 +198,7 @@ mod tests {
         let b = test_grid(32, 32);
         let mut f = island(b);
         let mut level = 0.0;
-        let mut params = CoastalParams::default();
-        params.wave_erosivity = 1.0;
+        let params = CoastalParams { wave_erosivity: 1.0, ..Default::default() };
         let before_vol: f64 = f.as_slice().iter().sum::<f64>() * 100.0 * 100.0;
         let balance = apply(&mut f, &params, &mut level, 100.0, 1000.0, &medium_rock(b));
         assert!(balance.removed_m3 > 0.0, "no cliff retreat");

@@ -175,27 +175,37 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn grid_limits_are_enforced() {
-        let mut c = WorldConfig::default();
-        c.grid = (8, 8);
-        assert!(c.validate().is_err());
-        c.grid = (20000, 20000);
-        assert!(c.validate().is_err());
-        c.grid = (256, 256);
-        assert!(c.validate().is_ok());
+        for grid in [(8, 8), (20000, 20000)] {
+            let mut c = WorldConfig::default();
+            c.grid = grid;
+            assert!(c.validate().is_err(), "grid {grid:?} accepted");
+        }
+        WorldConfig::default().validate().expect("default rejected");
     }
 
     #[test]
     fn parameter_ranges_are_enforced() {
-        let mut c = WorldConfig::default();
-        c.spatial_km = 0.5;
-        assert!(c.validate().is_err());
-        c.spatial_km = 200.0;
-        c.vertical_m = 60_000.0;
-        assert!(c.validate().is_err());
-        c.vertical_m = 5000.0;
-        c.sea_level_m = 6000.0;
-        assert!(c.validate().is_err());
+        for (field, bad, good) in [
+            ("spatial_km", 0.5, 200.0),
+            ("vertical_m", 60_000.0, 5000.0),
+            ("sea_level_m", 6000.0, 0.0),
+        ] {
+            let mut c = WorldConfig::default();
+            match field {
+                "spatial_km" => c.spatial_km = bad,
+                "vertical_m" => c.vertical_m = bad,
+                _ => c.sea_level_m = bad,
+            }
+            assert!(c.validate().is_err(), "{field}={bad} accepted");
+            match field {
+                "spatial_km" => c.spatial_km = good,
+                "vertical_m" => c.vertical_m = good,
+                _ => c.sea_level_m = good,
+            }
+            assert!(c.validate().is_ok(), "{field}={good} rejected");
+        }
     }
 
     #[test]

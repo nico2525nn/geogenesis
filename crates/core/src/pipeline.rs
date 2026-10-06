@@ -47,8 +47,12 @@ pub fn generate_initial(params: &Params) -> Result<PipelineOutput, crate::GeoErr
     // 2. Uplift (metres over the span).
     let uplift = compute_uplift(&mosaic, b, &p.uplift, seed);
 
-    // 3. Fractal base relief in [-1, 1].
-    let noise_field = NoiseField::new(p.noise.clone(), seed);
+    // 3. Fractal base relief in [-1, 1]. Octaves above 4 add detail below the
+    // grid spacing while costing one full extra evaluation per cell each;
+    // clamp there so a UI-driven octaves=16 cannot silently 4x the cost.
+    let mut base_noise = p.noise.clone();
+    base_noise.octaves = base_noise.octaves.min(4);
+    let noise_field = NoiseField::new(base_noise, seed);
     let cycles = uplift_cycles(&p.noise, extent_m);
     let mut relief = noise_field.fill(b, cycles);
 
@@ -94,6 +98,8 @@ fn uplift_cycles(noise: &NoiseParams, extent_m: f64) -> f64 {
     let _ = extent_m;
     // 24–64 cycles across the domain gives features from ranges down to hills
     // at 256²; finer detail comes from the octaves, not the base frequency.
+    // Octaves above 4 add sub-cell detail the grid cannot resolve while
+    // doubling the per-cell cost per octave — the pipeline clamps there.
     32.0 * (1.0 + noise.persistence * 0.5)
 }
 

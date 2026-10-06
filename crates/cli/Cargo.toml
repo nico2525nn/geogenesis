@@ -1,0 +1,18 @@
+[package]
+name = "geogenesis-cli"
+description = "Command-line terrain generation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "geogenesis"
+path = "src/main.rs"
+
+[dependencies]
+geogenesis-core = { workspace = true }

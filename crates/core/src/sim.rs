@@ -76,6 +76,11 @@ impl Simulation {
         let b = *self.elevation().boundary();
         let cell_m = self.params.world.cell_size_m();
         let n = self.state.iteration;
+        // One downhill order per step, shared by every process that needs a
+        // topological visitation: each sort is O(cells log cells), and the
+        // old code paid it four times per step (fluvial, hillslope,
+        // glacial, catchment).
+        let step_order = crate::hydrology::accumulation_order(self.elevation());
 
         // Rainfall and runoff refresh on the climate schedule.
         if n % self.params.schedule.climate.max(1) as u64 == 0 {
@@ -95,16 +100,17 @@ impl Simulation {
 
         // Climate and vegetation on their schedules.
         if n % self.params.schedule.climate.max(1) as u64 == 0 {
-            self.climate = Some(compute_climate(
-                self.elevation(),
-                &self.soil_m,
-                &self.params.climate,
-                &self.params.vegetation,
-                &self.params.rain,
-                self.params.world.effective_seed(),
-                cell_m,
-                self.params.glacial.lapse_rate_c_km,
-            ));
+            let inputs = crate::climate::ClimateInputs {
+                elevation: self.elevation(),
+                soil_m: &self.soil_m,
+                climate: &self.params.climate,
+                vegetation: &self.params.vegetation,
+                rain: &self.params.rain,
+                seed: self.params.world.effective_seed(),
+                cell_size_m: cell_m,
+                lapse_c_km: self.params.glacial.lapse_rate_c_km,
+            };
+            self.climate = Some(compute_climate(&inputs));
         }
 
         // Geology follows cumulative erosion.
@@ -114,7 +120,7 @@ impl Simulation {
 
         // Fluvial.
         if n % self.params.schedule.fluvial.max(1) as u64 == 0 {
-            let bal = crate::erosion::fluvial::apply(
+            let bal = crate::erosion::fluvial::apply_with_order(
                 &mut self.output.world.elevation_m,
                 &self.params.fluvial,
                 cell_m,
@@ -122,6 +128,7 @@ impl Simulation {
                 &self.runoff_mm,
                 &self.soil_m,
                 &geo.erodibility,
+                Some(&step_order),
             );
             step_balance.add_assign(bal);
             self.track_erosion(&bal, cell_m);
@@ -129,12 +136,13 @@ impl Simulation {
 
         // Hillslope.
         if n % self.params.schedule.hillslope.max(1) as u64 == 0 {
-            let bal = crate::erosion::hillslope::apply(
+            let bal = crate::erosion::hillslope::apply_with_order(
                 &mut self.output.world.elevation_m,
                 &mut self.soil_m,
                 &self.params.hillslope,
                 cell_m,
                 dt,
+                Some(&step_order),
                 );
             step_balance.add_assign(bal);
             self.track_erosion(&bal, cell_m);
@@ -143,12 +151,13 @@ impl Simulation {
         // Glacial on its (slower) schedule.
         if n % self.params.schedule.glacial.max(1) as u64 == 0 {
             let area = self.catchment_area();
-            let bal = crate::erosion::glacial::apply(
+            let bal = crate::erosion::glacial::apply_with_order(
                 &mut self.output.world.elevation_m,
                 &self.params.glacial,
                 cell_m,
                 dt * self.params.schedule.glacial.max(1) as f64,
                 &area,
+                Some(&step_order),
             );
             step_balance.add_assign(bal);
             self.track_erosion(&bal, cell_m);
@@ -161,12 +170,13 @@ impl Simulation {
                 .as_ref()
                 .map(|c| c.vegetation.clone())
                 .unwrap_or_else(|| ScalarField::zeros(b));
-            let bal = crate::erosion::wind::apply(
+            let bal = crate::erosion::wind::apply_with_order(
                 &mut self.output.world.elevation_m,
                 &self.params.wind,
                 &veg,
                 cell_m,
                 dt,
+                Some(&step_order),
             );
             step_balance.add_assign(bal);
             self.track_erosion(&bal, cell_m);
@@ -273,8 +283,8 @@ impl Simulation {
         );
         let mut out = ScalarField::zeros(b);
         let m2 = self.params.world.cell_size_m().powi(2);
-        for i in 0..b.cell_count() {
-            out.set_index(i, (acc[i] + 1.0) * m2);
+        for (i, &a) in acc.iter().enumerate() {
+            out.set_index(i, (a + 1.0) * m2);
         }
         out
     }

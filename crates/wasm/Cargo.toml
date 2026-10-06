@@ -1,0 +1,20 @@
+[package]
+name = "geogenesis-wasm"
+description = "Raw C-ABI WebAssembly bindings (no wasm-bindgen)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+not_unsafe_ptr_arg_deref = "allow"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+geogenesis-core = { workspace = true }

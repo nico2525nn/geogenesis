@@ -66,6 +66,18 @@ pub fn apply(
     cell_size_m: f64,
     dt_yr: f64,
 ) -> MassBalance {
+    apply_with_order(surface, soil, params, cell_size_m, dt_yr, None)
+}
+
+/// Applies one interval, reusing the caller's downhill order when given.
+pub fn apply_with_order(
+    surface: &mut ScalarField,
+    soil: &mut ScalarField,
+    params: &HillslopeParams,
+    cell_size_m: f64,
+    dt_yr: f64,
+    order: Option<&[usize]>,
+) -> MassBalance {
     let b = *surface.boundary();
     let dt = dt_yr.max(0.0);
     let mut balance = MassBalance::default();
@@ -112,8 +124,17 @@ pub fn apply(
         // cell to exceed 1% of the domain relief before failing it.
         let relief = surface.max() - surface.min();
         let min_drop = (relief * 0.01).max(cell_size_m * 0.02);
-        let order = crate::hydrology::accumulation_order(surface);
-        for &idx in &order {
+        // Reuse the step order when the caller supplies one; the landslide
+        // loop needs descending elevation, which is exactly what it is.
+        let owned;
+        let order: &[usize] = match order {
+            Some(o) => o,
+            None => {
+                owned = crate::hydrology::accumulation_order(surface);
+                &owned
+            }
+        };
+        for &idx in order {
             let (x, y) = b2.coords(idx);
             let slope = surface.slope(x, y, cell_size_m);
             if !slope.is_finite() || slope <= repose_tan {

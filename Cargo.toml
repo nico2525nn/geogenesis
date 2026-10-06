@@ -2,6 +2,9 @@
 resolver = "2"
 members = [
     "crates/core",
+    "crates/wasm",
+    "crates/cli",
+    "crates/bench",
 ]
 
 [workspace.package]
@@ -17,3 +20,7 @@ geogenesis-core = { path = "crates/core" }
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"
+
+[profile.release]
+opt-level = "s"
+lto = true
