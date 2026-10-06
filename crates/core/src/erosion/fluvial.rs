@@ -12,7 +12,7 @@
 //! exported off the domain. [`MassBalance`] closes the account.
 
 use crate::erosion::{repair_field, MassBalance};
-use crate::grid::{Boundary, ScalarField};
+use crate::grid::ScalarField;
 use crate::hydrology::{condition_d8, condition_mfd};
 
 /// The sediment discharge law, per spec §3b's table.
@@ -375,7 +375,7 @@ pub fn concavity_index(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::BoundaryKind;
+    use crate::grid::{Boundary, BoundaryKind};
 
     fn test_grid(w: usize, h: usize) -> Boundary {
         Boundary::new(BoundaryKind::Rectangular, w, h)

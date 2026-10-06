@@ -18,15 +18,21 @@
 
 pub mod climate;
 pub mod erosion;
+pub mod export;
 pub mod features;
 pub mod geology;
 pub mod grid;
 pub mod hydrology;
 pub mod linalg;
 pub mod noise;
+pub mod params;
+pub mod pipeline;
 pub mod plates;
 pub mod rng;
+pub mod sim;
+pub mod stats;
 pub mod uplift;
+pub mod world;
 
 /// Result type used throughout the engine.
 pub type GeoResult<T> = core::result::Result<T, GeoError>;

@@ -8,8 +8,7 @@
 //! Like every process here, this one returns a [`MassBalance`].
 
 use crate::erosion::{repair_field, MassBalance};
-use crate::grid::{Boundary, ScalarField};
-use crate::linalg::clamp;
+use crate::grid::ScalarField;
 
 /// Coastal parameters, matching spec §3f ranges.
 #[derive(Debug, Clone, PartialEq)]
@@ -172,7 +171,7 @@ pub fn surf_fraction(surface: &ScalarField, sea_level_m: f64, wave_base_m: f64) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::BoundaryKind;
+    use crate::grid::{Boundary, BoundaryKind};
 
     fn test_grid(w: usize, h: usize) -> Boundary {
         Boundary::new(BoundaryKind::Rectangular, w, h)
@@ -289,7 +288,7 @@ mod tests {
             c1.removed_m3,
             c2.removed_m3
         );
-        let _ = (b1, b2, clamp(0.0, 0.0, 1.0));
+        let _ = (b1, b2);
     }
 
     #[test]

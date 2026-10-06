@@ -7,7 +7,7 @@
 //! spec §5b.
 
 use crate::erosion::rainfall::{precipitation, RainfallParams};
-use crate::grid::{Boundary, LabelField, ScalarField};
+use crate::grid::{LabelField, ScalarField};
 use crate::linalg::clamp;
 
 /// Climate parameters, matching spec §5a ranges.
@@ -283,7 +283,7 @@ pub fn biome_fractions(climate: &Climate) -> [f64; 9] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::BoundaryKind;
+    use crate::grid::{Boundary, BoundaryKind};
 
     fn test_grid() -> Boundary {
         Boundary::new(BoundaryKind::Rectangular, 24, 24)

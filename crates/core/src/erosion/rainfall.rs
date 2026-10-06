@@ -9,7 +9,7 @@
 //! The output feeds fluvial erosion (runoff), chemical weathering (throughflow)
 //! and the biome model (water availability).
 
-use crate::grid::{Boundary, ScalarField};
+use crate::grid::ScalarField;
 use crate::linalg::clamp;
 
 /// Rainfall parameters, matching spec §3a ranges.
@@ -153,7 +153,7 @@ pub fn runoff_field(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::BoundaryKind;
+    use crate::grid::{Boundary, BoundaryKind};
 
     fn test_grid(w: usize, h: usize) -> Boundary {
         Boundary::new(BoundaryKind::Rectangular, w, h)

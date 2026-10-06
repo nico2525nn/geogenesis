@@ -10,7 +10,7 @@
 //! can prove conservation.
 
 use crate::erosion::{repair_field, MassBalance};
-use crate::grid::{Boundary, ScalarField};
+use crate::grid::ScalarField;
 use crate::linalg::clamp;
 
 /// Wind process parameters, matching spec §3d ranges.
@@ -181,7 +181,7 @@ pub fn dune_migration_m_yr(height_m: f64, capacity_myr: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::BoundaryKind;
+    use crate::grid::{Boundary, BoundaryKind};
 
     fn test_grid(w: usize, h: usize) -> Boundary {
         Boundary::new(BoundaryKind::Rectangular, w, h)

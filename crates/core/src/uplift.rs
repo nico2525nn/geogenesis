@@ -3,7 +3,7 @@
 //! Rates are m/yr and durations are years; [`UpliftRate::total_uplift`] is the only rate → displacement step.
 
 use crate::grid::{Boundary, LabelField, ScalarField};
-use crate::linalg::{clamp, smoothstep, Vec2};
+use crate::linalg::{clamp, smoothstep};
 use crate::plates::{BoundaryType, PlateMosaic};
 
 /// Uplift parameters, matching spec §1b ranges.
@@ -441,6 +441,7 @@ pub fn plate_labels(mosaic: &PlateMosaic) -> LabelField {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::linalg::Vec2;
     use crate::grid::BoundaryKind;
     use crate::plates::{build_mosaic, PlateParams, Plate};
 

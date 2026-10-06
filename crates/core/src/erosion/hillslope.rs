@@ -14,7 +14,7 @@
 //! than by capping the user's timestep: the caller asks for `dt` years and the
 //! process applies as many stable sub-steps as that requires.
 
-use crate::erosion::{clamp_timestep, diffusion_timestep_yr, repair_field, MassBalance};
+use crate::erosion::{clamp_timestep, repair_field, MassBalance};
 use crate::grid::ScalarField;
 
 /// Hillslope parameters, matching spec §3c ranges.
@@ -195,6 +195,7 @@ pub fn soil_volume_m3(soil: &ScalarField, cell_size_m: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::erosion::diffusion_timestep_yr;
     use crate::grid::BoundaryKind;
 
     fn test_grid(w: usize, h: usize) -> crate::grid::Boundary {
