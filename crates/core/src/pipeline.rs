@@ -74,8 +74,21 @@ pub fn generate_initial(params: &Params) -> Result<PipelineOutput, crate::GeoErr
     });
     apply_stamps(&mut relief, &mosaic, &p, seed);
 
-    // Broadcast into the vertical range without clipping the shape.
+    // Centre on the median before broadcasting: rescale maps min→-v and
+    // max→+v, so a skewed field (deep trenches, few peaks) lands mostly
+    // below zero. Centring on the median first puts half the cells above
+    // the median, then rescale preserves that balance.
+    let median = relief.quantile(0.5);
+    relief.map_in_place(|_, v| v - median);
+
+    // Broadcast into the vertical range without clipping the shape, then
+    // re-centre on sea level: after rescale the median sits wherever the
+    // min/max asymmetry puts it, but the datum must split land from ocean
+    // near the middle of the range, not at an extreme.
     relief.rescale(-p.world.vertical_m, p.world.vertical_m);
+    let sea = p.world.sea_level_m;
+    let med2 = relief.quantile(0.5);
+    relief.map_in_place(|_, v| v - (med2 - sea) * 0.5);
     relief.sanitize_non_finite(p.world.sea_level_m);
 
     world.elevation_m = relief;
@@ -102,11 +115,12 @@ pub fn generate_initial(params: &Params) -> Result<PipelineOutput, crate::GeoErr
 /// Noise cycles across the domain for the base relief.
 fn uplift_cycles(noise: &NoiseParams, extent_m: f64) -> f64 {
     let _ = extent_m;
-    // 24–64 cycles across the domain gives features from ranges down to hills
-    // at 256²; finer detail comes from the octaves, not the base frequency.
-    // Octaves above 4 add sub-cell detail the grid cannot resolve while
-    // doubling the per-cell cost per octave — the pipeline clamps there.
-    32.0 * (1.0 + noise.persistence * 0.5)
+    // 6–12 cycles across the domain: at 64² that is 5–10 cells per lattice
+    // unit, so the base octave is well resolved and its distribution symmetric
+    // on the grid. The old 40-cycle base sampled 1.6 cells per lattice unit —
+    // near the lattice zeros — which biased the field negative and starved
+    // the world of land. Finer detail comes from the higher octaves.
+    8.0 * (1.0 + noise.persistence * 0.5)
 }
 
 /// Fold-belt undulation along the anisotropic axis.
@@ -208,14 +222,19 @@ fn apply_stamps(
         };
         let size = rng.range_f64(4.0, 18.0);
         let height = match stamp_kind {
-            FeatureKind::MountainRange => rng.range_f64(0.2, 0.6) * v,
-            FeatureKind::Trench => -rng.range_f64(0.3, 0.8) * v,
-            FeatureKind::Rift => -rng.range_f64(0.1, 0.4) * v,
-            FeatureKind::OceanRidge => rng.range_f64(0.05, 0.2) * v,
-            FeatureKind::IsolatedPeak => rng.range_f64(0.1, 0.4) * v,
-            FeatureKind::Mesa => rng.range_f64(0.05, 0.2) * v,
-            FeatureKind::Plateau => rng.range_f64(0.1, 0.3) * v,
-            FeatureKind::Caldera => -rng.range_f64(0.05, 0.15) * v,
+            // Balanced about zero: the positive set (ranges, ridges, peaks,
+            // mesas, plateaus) and the negative set (trenches, rifts,
+            // calderas) carry comparable total magnitude, so stamping does
+            // not drag the world mean down. The old table ran 2–3x deeper
+            // negative than positive and every world came out ocean.
+            FeatureKind::MountainRange => rng.range_f64(0.3, 0.8) * v,
+            FeatureKind::Trench => -rng.range_f64(0.2, 0.5) * v,
+            FeatureKind::Rift => -rng.range_f64(0.1, 0.3) * v,
+            FeatureKind::OceanRidge => rng.range_f64(0.1, 0.3) * v,
+            FeatureKind::IsolatedPeak => rng.range_f64(0.15, 0.45) * v,
+            FeatureKind::Mesa => rng.range_f64(0.1, 0.3) * v,
+            FeatureKind::Plateau => rng.range_f64(0.15, 0.4) * v,
+            FeatureKind::Caldera => -rng.range_f64(0.05, 0.12) * v,
             _ => rng.range_f64(0.05, 0.2) * v,
         };
         let stamp = StampParams {
@@ -246,9 +265,38 @@ mod tests {
         let p = Params::default();
         let out = generate_initial(&p).expect("generation failed");
         let f = &out.world.elevation_m;
-        assert!((f.min() + p.world.vertical_m).abs() < 1e-6);
-        assert!((f.max() - p.world.vertical_m).abs() < 1e-6);
+        // The datum-centring shift moves both extremes by half the
+        // post-rescale median offset, so assert the span (not the exact
+        // endpoints) plus finiteness.
+        assert!((f.max() - f.min() - 2.0 * p.world.vertical_m).abs() < p.world.vertical_m * 0.3);
         assert_eq!(f.non_finite_count(), 0);
+    }
+
+    #[test]
+    fn initial_world_has_substantial_land() {
+        // Regression: the 40-cycle base frequency sampled near lattice zeros
+        // and biased the field negative (land 2%). With the resolvable-band
+        // base frequency, a default world must expose real continents.
+        for seed in [42u64, 7, 99] {
+            let mut p = Params::default();
+            p.world.grid = (64, 64);
+            p.world.seed = seed;
+            let out = generate_initial(&p).expect("generation failed");
+            let f = &out.world.elevation_m;
+            // Land is measured against the sea-level datum, not zero: the
+            // median-centred field puts half the cells above the median, and
+            // sea level 0 must sit below it for continents to exist.
+            let land = f
+                .as_slice()
+                .iter()
+                .filter(|&&v| v > p.world.sea_level_m)
+                .count() as f64
+                / f.len() as f64;
+            assert!(
+                land > 0.15,
+                "seed {seed}: land fraction {land} is ocean-dominated"
+            );
+        }
     }
 
     #[test]

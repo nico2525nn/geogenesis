@@ -428,8 +428,10 @@ pub fn convection_noise(
     world_seed: u64,
     years: f64,
 ) -> ScalarField {
-    // Spec range mapped onto periods across the domain; the raw value would yield a flat field.
-    let cycles = params.noise_frequency.clamp(0.001, 1.0) * 32.0;
+    // Spec range mapped onto periods across the domain. Kept in the
+    // resolvable band (≤12 cycles): higher values sample near lattice zeros
+    // and bias the field, starving the world of relief variation.
+    let cycles = params.noise_frequency.clamp(0.001, 1.0) * 12.0;
     let field = crate::noise::NoiseField::new(
         crate::noise::NoiseParams {
             kind: crate::noise::NoiseKind::Simplex,
