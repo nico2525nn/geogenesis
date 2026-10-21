@@ -43,6 +43,7 @@ import {
 import { clamp, formatDuration, formatPercent, formatSigned } from "./ui/format";
 import { el, icon, initTooltips, setText, type IconName } from "./ui/dom";
 import { FpsMeter } from "./ui/fps";
+import { wasmUnavailableMessage } from "./engine/wasm";
 import { buildProjectJson, parseProjectJson, type ProjectGeology } from "./ui/project";
 import {
   describeGeology,
@@ -1765,6 +1766,14 @@ function wireGlobalKeys(): void {
 // ---------------------------------------------------------------------------
 
 async function boot(): Promise<void> {
+  if (typeof WebAssembly === "undefined") {
+    if (bootOverlay === null) {
+      bootOverlay = new BootOverlay(bootLayer, bootRetry);
+    }
+    bootOverlay.showError(wasmUnavailableMessage(), () => window.location.reload());
+    setStatus("WebAssembly is not available in this browser", true);
+    return;
+  }
   initTooltips();
   hydrateIcons();
   wireStaticControls();

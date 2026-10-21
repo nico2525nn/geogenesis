@@ -23,6 +23,39 @@ import { FIELD_IDS } from "../types";
 /** Where the compiled engine lives (copied there by scripts/build-wasm.sh). */
 export const WASM_URL = `${import.meta.env.BASE_URL}engine.wasm`;
 
+/** True when this context can compile and run WebAssembly modules. */
+export function wasmAvailable(): boolean {
+  return (
+    typeof WebAssembly !== "undefined" &&
+    typeof WebAssembly.instantiate === "function" &&
+    typeof WebAssembly.Memory === "function"
+  );
+}
+
+/**
+ * Human-readable guidance for browsers where WebAssembly is unavailable.
+ *
+ * The most common causes are hardened browsers (Tor Browser "Safest" security
+ * level), Safari Lockdown Mode, privacy forks that disable WASM, and privacy
+ * extensions/policies that block WebAssembly. GeoGenesis cannot run without it.
+ */
+export function wasmUnavailableMessage(): string {
+  const ua = typeof navigator === "undefined" ? "" : navigator.userAgent;
+  let hint =
+    "WebAssembly is unavailable or disabled in this browser. GeoGenesis cannot run without it.";
+  if (/Tor Browser/i.test(ua)) {
+    hint =
+      "Tor Browser disables WebAssembly at the \"Safest\" security level. Set the security level to Standard or Safer, or open the demo in Chrome, Edge or Firefox in normal mode.";
+  } else if (/Safari/i.test(ua) && !/Chrome|Chromium|Edg|OPR/i.test(ua)) {
+    hint =
+      "Safari has WebAssembly disabled (often Lockdown Mode or a content blocker). Turn off Lockdown Mode / allow WebAssembly for this site, or open the demo in Chrome, Edge or Firefox in normal mode.";
+  } else if (/Firefox|LibreWolf|Waterfox/i.test(ua)) {
+    hint =
+      "WebAssembly is disabled in this Firefox profile. Set about:config \"javascript.options.wasm\" to true (and allow scripts for this site), or open the demo in Chrome or Edge.";
+  }
+  return `${hint} / このブラウザでは WebAssembly が無効です。Tor の「最強」セキュリティ、Safari のロックダウンモード、WASM を無効化する設定/拡張を確認するか、通常の Chrome / Edge / Firefox で開いてください。`;
+}
+
 type Ptr = number;
 
 interface EngineExports extends WebAssembly.Exports {
@@ -96,6 +129,9 @@ export class WasmEngine {
 
   /** Instantiates the module from a URL. */
   static async load(url: string = WASM_URL): Promise<WasmEngine> {
+    if (!wasmAvailable()) {
+      throw new EngineError(wasmUnavailableMessage());
+    }
     const response = await fetch(url);
     if (!response.ok) {
       throw new EngineError(`cannot load engine.wasm (${response.status})`);

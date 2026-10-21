@@ -1034,6 +1034,19 @@ button:disabled {
   min-height: 16px;
 }
 
+.boot-hint {
+  margin: 0.75rem 0 0;
+  max-width: 30rem;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: var(--text-faint);
+  text-align: center;
+}
+
+.boot-layer.is-error .boot-hint {
+  display: none;
+}
+
 .boot-bar {
   height: 3px;
   border-radius: 2px;
