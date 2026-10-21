@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "custom_rocks": [
+    {
+      "name": "Quartzite",
+      "colour": [214, 206, 190],
+      "mohs": 7.0,
+      "permeability_m2": 8e-16,
+      "friction_angle_deg": 48.0,
+      "cohesion_mpa": 14.0,
+      "density_kg_m3": 2650.0,
+      "solubility": 0.03,
+      "weathering_rate_m_yr": 2e-5,
+      "origin": "metamorphic"
+    },
+    {
+      "name": "Salt",
+      "colour": [232, 220, 232],
+      "mohs": 2.5,
+      "permeability_m2": 1e-14,
+      "friction_angle_deg": 30.0,
+      "cohesion_mpa": 1.0,
+      "density_kg_m3": 2170.0,
+      "solubility": 0.95,
+      "weathering_rate_m_yr": 0.005,
+      "origin": "sedimentary"
+    },
+    {
+      "name": "Volcanic breccia",
+      "colour": [98, 84, 78],
+      "mohs": 3.5,
+      "permeability_m2": 5e-12,
+      "friction_angle_deg": 36.0,
+      "cohesion_mpa": 4.0,
+      "density_kg_m3": 2300.0,
+      "solubility": 0.08,
+      "weathering_rate_m_yr": 2e-4,
+      "origin": "igneous"
+    }
+  ]
+}

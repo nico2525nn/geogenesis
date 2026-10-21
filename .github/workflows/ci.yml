@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: Rust core, CLI and WASM ABI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --workspace
+      - name: Validation harness (release)
+        run: cargo test --release -p geogenesis-core --test validation
+      - name: Build WASM
+        run: ./scripts/build-wasm.sh
+      - name: WASM ABI smoke test
+        run: node scripts/smoke-wasm.mjs
+      - name: CLI integration smoke
+        run: |
+          cargo build -p geogenesis-cli --release
+          rm -rf /tmp/gg-smoke
+          ./target/release/geogenesis generate --grid 96 \
+            --rocks examples/custom-rocks.json --strata examples/strata.json \
+            --out /tmp/gg-smoke
+          for f in terrain.png height16.png normals.png profile.png terrain.exr fields.nc terrain.gltf minerals.png minerals.json stats.json params.json; do
+            test -f "/tmp/gg-smoke/$f"
+          done
+      - name: Upload engine.wasm
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-wasm
+          path: web/public/engine.wasm
+
+  web:
+    name: Web UI
+    runs-on: ubuntu-latest
+    needs: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        run: npm ci
+        working-directory: web
+      - name: Typecheck
+        run: npm run check
+        working-directory: web
+      - name: Download engine.wasm
+        uses: actions/download-artifact@v4
+        with:
+          name: engine-wasm
+          path: web/public
+      - name: Build
+        run: npm run build
+        working-directory: web
+
+  deploy:
+    name: Deploy demo to GitHub Pages
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    needs: web
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        run: npm ci
+        working-directory: web
+      - name: Download engine.wasm
+        uses: actions/download-artifact@v4
+        with:
+          name: engine-wasm
+          path: web/public
+      - name: Build
+        run: npm run build
+        working-directory: web
+        env:
+          VITE_BASE: /geogenesis/
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+      - id: deployment
+        uses: actions/deploy-pages@v4

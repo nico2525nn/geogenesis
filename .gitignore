@@ -1,0 +1,38 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Node / Web
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# WASM
+*.wasm
+pkg/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+bun.lock
+bun.lockb
+
+# Generated
+*.generated.*
+
+# CLI exports
+/out/

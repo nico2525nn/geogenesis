@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/wasm", "crates/cli", "crates/plugin-example"]
+
+[workspace.package]
+version = "2.0.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+authors = ["GeoGenesis contributors"]
+repository = "https://github.com/nico2525nn/geogenesis"
+
+[workspace.dependencies]
+geogenesis-core = { path = "crates/core" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.bench]
+inherits = "release"
+debug = false

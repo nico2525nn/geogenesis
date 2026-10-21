@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0a0d12" />
+    <meta
+      name="description"
+      content="GeoGenesis — a scientific terrain-genesis engine: plate tectonics, erosion, climate and deep time in your browser."
+    />
+    <title>GeoGenesis — terrain genesis engine</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230a0d12'/%3E%3Cpath d='M16 5l9 6v10l-9 6-9-6V11z' fill='none' stroke='%237fd8c8' stroke-width='2' stroke-linejoin='round'/%3E%3Cpath d='M7 11l9 6 9-6M16 17v10' fill='none' stroke='%237fd8c8' stroke-width='2' stroke-linejoin='round'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <div id="app" class="app is-booting">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">◈</span>
+          <div class="brand-text">
+            <h1>GeoGenesis</h1>
+            <span class="tagline">terrain genesis engine</span>
+          </div>
+          <span id="topbar-preset" class="header-chip" title="Active preset">loading…</span>
+        </div>
+        <div class="topbar-actions">
+          <label class="select-field" title="Colour mode / overlay field">
+            <span class="select-label">View</span>
+            <select id="mode-select" aria-label="Colour mode"></select>
+          </label>
+          <button
+            id="btn-suggest"
+            type="button"
+            class="ghost-button suggest-button"
+            title="Suggest terrain: preview 8 candidate worlds without changing the current one"
+            aria-label="Suggest terrain"
+          >
+            <span class="button-icon" data-icon="sparkles" aria-hidden="true"></span>
+            <span class="button-text">Suggest</span>
+          </button>
+          <button id="btn-randomize" type="button" class="ghost-button" title="Randomise every parameter and generate">
+            <span class="button-icon" data-icon="dice" aria-hidden="true"></span>
+            <span class="button-text">Randomize</span>
+          </button>
+          <button id="btn-regenerate" type="button" class="primary generate-button" title="Generate the world from the current parameters">
+            <span class="button-icon" data-icon="run" aria-hidden="true"></span>
+            <span class="button-text">Generate</span>
+          </button>
+          <div class="export-menu">
+            <button id="btn-export" type="button" class="ghost-button" aria-haspopup="menu" aria-expanded="false">
+              <span class="button-icon" data-icon="download" aria-hidden="true"></span>
+              <span class="button-text">Export</span>
+              <span class="button-caret" aria-hidden="true">▾</span>
+            </button>
+            <div id="export-items" class="menu" hidden></div>
+          </div>
+          <span class="topbar-divider" aria-hidden="true"></span>
+          <button id="btn-params" type="button" class="icon-button" aria-label="Toggle parameters panel" aria-controls="sidebar-left" aria-expanded="true">
+            <span data-icon="sliders" aria-hidden="true"></span>
+          </button>
+          <button id="btn-stats" type="button" class="icon-button" aria-label="Toggle statistics panel" aria-controls="sidebar-right" aria-expanded="true">
+            <span data-icon="chart" aria-hidden="true"></span>
+          </button>
+          <button id="btn-help" type="button" class="icon-button" aria-label="Keyboard shortcuts and help" aria-haspopup="dialog">
+            <span data-icon="help" aria-hidden="true"></span>
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <aside id="sidebar-left" class="sidebar sidebar-left" aria-label="Simulation parameters">
+          <div class="sidebar-head">
+            <div class="preset-row">
+              <label class="select-field grow">
+                <span>Preset</span>
+                <select id="preset-select" aria-label="World preset"></select>
+              </label>
+              <button id="btn-seed" type="button" class="icon-button" title="New random seed and regenerate" aria-label="New random seed and regenerate">
+                <span data-icon="dice" aria-hidden="true"></span>
+              </button>
+              <button id="btn-geology" type="button" class="icon-button" title="Load custom rocks / strata JSON" aria-label="Custom geology">
+                <span data-icon="layers" aria-hidden="true"></span>
+              </button>
+            </div>
+            <p id="preset-description" class="preset-description">Choose a world archetype, then fine-tune the parameters below.</p>
+            <p id="geology-status" class="geology-status" hidden></p>
+          </div>
+          <div id="panel-host" class="panel-scroll">
+            <div class="skeleton" role="status" aria-label="Loading parameters">
+              <div class="skeleton-row"></div>
+              <div class="skeleton-row short"></div>
+              <div class="skeleton-row"></div>
+              <div class="skeleton-row"></div>
+              <div class="skeleton-row short"></div>
+              <div class="skeleton-row"></div>
+              <div class="skeleton-row short"></div>
+              <div class="skeleton-row"></div>
+            </div>
+          </div>
+        </aside>
+
+        <section class="stage" aria-label="Terrain viewport">
+          <div id="viewport" class="viewport"></div>
+
+          <div class="view-tools" role="group" aria-label="View controls">
+            <button id="btn-reset-view" type="button" class="icon-button" title="Reset camera (R)" aria-label="Reset camera">
+              <span data-icon="target" aria-hidden="true"></span>
+            </button>
+            <div class="exaggeration" title="Vertical relief exaggeration">
+              <span class="exaggeration-label">Relief</span>
+              <button id="btn-exag-down" type="button" class="exaggeration-step" aria-label="Decrease vertical exaggeration">
+                <span data-icon="minus" aria-hidden="true"></span>
+              </button>
+              <output id="exag-value" class="exaggeration-value">×1.0</output>
+              <button id="btn-exag-up" type="button" class="exaggeration-step" aria-label="Increase vertical exaggeration">
+                <span data-icon="plus" aria-hidden="true"></span>
+              </button>
+            </div>
+          </div>
+
+          <div id="suggestion-bar" class="suggestion-bar" role="status" aria-live="polite" hidden>
+            <span class="suggestion-icon" data-icon="sparkles" aria-hidden="true"></span>
+            <div class="suggestion-body">
+              <span id="suggestion-title" class="suggestion-title">Suggestion (preview)</span>
+              <span id="suggestion-detail" class="suggestion-detail"></span>
+            </div>
+            <div class="suggestion-actions">
+              <button id="suggestion-apply" type="button" class="primary">Apply</button>
+              <button id="suggestion-dismiss" type="button" class="ghost-button">Dismiss</button>
+            </div>
+          </div>
+
+          <div class="map-dock">
+            <div class="map-caption">
+              <span class="map-title">Map</span>
+              <span class="map-hint">drag to draw section</span>
+            </div>
+            <canvas id="minimap" class="minimap" width="240" height="240" aria-label="Map and cross-section picker"></canvas>
+          </div>
+
+          <div id="legend-host" class="legend" hidden></div>
+
+          <div id="hud" class="hud" aria-label="Simulation status">
+            <span id="hud-time" class="hud-time">t = 0 yr</span>
+            <span id="hud-sea" class="hud-chip"></span>
+            <span id="hud-land" class="hud-chip"></span>
+            <span id="hud-fps" class="hud-fps" aria-label="Render frame rate" title="Render frame rate">— fps</span>
+            <span id="hud-status" class="hud-status">loading engine…</span>
+            <div id="hud-progress" class="hud-progress" hidden>
+              <span id="hud-progress-fill" class="hud-progress-fill"></span>
+            </div>
+          </div>
+
+          <div id="toast" class="toast-stack" role="status" aria-live="polite" hidden></div>
+
+          <div id="boot-layer" class="boot-layer" role="status" aria-live="polite">
+            <div class="boot-card">
+              <div class="boot-mark" aria-hidden="true">◈</div>
+              <h2 class="boot-title">Booting GeoGenesis</h2>
+              <p class="boot-detail">loading the WebAssembly simulation engine…</p>
+              <div class="boot-bar"><span class="boot-fill"></span></div>
+              <button id="boot-retry" type="button" class="primary" hidden>Retry</button>
+            </div>
+          </div>
+        </section>
+
+        <aside id="sidebar-right" class="sidebar sidebar-right" aria-label="Statistics and cross-section">
+          <div id="stats-host" class="panel-scroll">
+            <div class="skeleton" role="status" aria-label="Loading statistics">
+              <div class="skeleton-row short"></div>
+              <div class="skeleton-row"></div>
+              <div class="skeleton-row"></div>
+              <div class="skeleton-row"></div>
+              <div class="skeleton-row short"></div>
+              <div class="skeleton-row"></div>
+            </div>
+          </div>
+          <section id="section-panel" class="section-panel" aria-label="Cross-section">
+            <header id="section-head" class="section-head"></header>
+            <canvas id="profile-canvas" class="profile-canvas" height="170" aria-label="Terrain cross-section"></canvas>
+          </section>
+        </aside>
+      </main>
+
+      <footer class="timeline" aria-label="Time controls">
+        <div id="timeline-host"></div>
+      </footer>
+    </div>
+
+    <div id="drawer-backdrop" class="drawer-backdrop" hidden></div>
+
+    <div id="geology-dialog" class="dialog-backdrop" hidden>
+      <div class="dialog geology-dialog" role="dialog" aria-modal="true" aria-labelledby="geology-title">
+        <header class="dialog-head">
+          <h2 id="geology-title">Custom geology</h2>
+          <button id="geology-close" type="button" class="icon-button" aria-label="Close custom geology">
+            <span data-icon="close" aria-hidden="true"></span>
+          </button>
+        </header>
+        <div class="dialog-body">
+          <p class="dialog-note">
+            Optionally load a custom rock catalogue and/or a strata stack as JSON. They are sent with the
+            next <strong>Generate</strong> and saved inside project files.
+          </p>
+          <div class="file-field">
+            <div class="file-field-head">
+              <label for="rocks-file">Custom rocks JSON</label>
+              <span id="rocks-status" class="file-status">No custom rocks — engine defaults</span>
+            </div>
+            <input id="rocks-file" type="file" accept=".json,application/json" />
+          </div>
+          <div class="file-field">
+            <div class="file-field-head">
+              <label for="strata-file">Strata stack JSON</label>
+              <span id="strata-status" class="file-status">No custom strata — engine defaults</span>
+            </div>
+            <input id="strata-file" type="file" accept=".json,application/json" />
+          </div>
+          <p id="geology-dialog-status" class="geology-status is-active">
+            No custom geology — the engine defaults will be used.
+          </p>
+          <div class="dialog-actions">
+            <button id="geology-clear" type="button" class="ghost-button">Clear geology</button>
+            <button id="geology-done" type="button" class="primary">Done</button>
+          </div>
+          <p class="dialog-hint">
+            Example files: <code>examples/custom-rocks.json</code>, <code>examples/strata.json</code>.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <div id="help-dialog" class="dialog-backdrop" hidden>
+      <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="help-title">
+        <header class="dialog-head">
+          <h2 id="help-title">Keyboard shortcuts</h2>
+          <button id="help-close" type="button" class="icon-button" aria-label="Close help" data-tip="Close (Esc)">
+            <span data-icon="close" aria-hidden="true"></span>
+          </button>
+        </header>
+        <div class="dialog-body">
+          <dl class="shortcut-list">
+            <div class="shortcut"><dt><kbd>Space</kbd></dt><dd>Play / pause simulation</dd></div>
+            <div class="shortcut"><dt><kbd>→</kbd></dt><dd>Step forward one base time step</dd></div>
+            <div class="shortcut"><dt><kbd>←</kbd></dt><dd>Step back to the previous captured frame</dd></div>
+            <div class="shortcut"><dt><kbd>Shift</kbd> + <kbd>→</kbd> / <kbd>←</kbd></dt><dd>Jump 5% of the duration</dd></div>
+            <div class="shortcut"><dt><kbd>Home</kbd> / <kbd>End</kbd></dt><dd>Jump to the start / end of the timeline</dd></div>
+            <div class="shortcut"><dt><kbd>G</kbd></dt><dd>Generate the world from the current parameters</dd></div>
+            <div class="shortcut"><dt><kbd>/</kbd></dt><dd>Focus the parameter filter</dd></div>
+            <div class="shortcut"><dt><kbd>R</kbd></dt><dd>Reset the camera</dd></div>
+            <div class="shortcut"><dt><kbd>Esc</kbd></dt><dd>Close menus and dialogs</dd></div>
+          </dl>
+          <section class="help-section">
+            <h3>Reading the simulation</h3>
+            <p>
+              The left panel generates the world; the timeline advances geological time; the right panel measures the
+              result. Drag on the minimap to move the cross-section line. The <strong>Run</strong> button replays the
+              configured duration and reports progress in the status bar. Use the <strong>Export</strong> menu to save
+              or load a project, <strong>Suggest</strong> to preview candidate worlds without touching the current
+              one, and the layers button next to the preset to load custom rocks or strata.
+            </p>
+          </section>
+          <section class="help-section">
+            <h3>Determinism</h3>
+            <p>
+              Worlds are deterministic: the same parameters and seed reproduce the same terrain. Exported project
+              JSON records the seed, preset and engine version so a result can be regenerated later.
+            </p>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <input id="project-file" type="file" accept=".json,application/json" hidden />
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

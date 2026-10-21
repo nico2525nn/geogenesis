@@ -1,0 +1,21 @@
+name: Feature request
+description: Suggest a feature or improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What scientific or UX need does this address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+      description: If it touches physics, describe the equations and mass balance; if UI, add a sketch.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [Generation, Tectonics/isostasy, Erosion/hydrology, Climate/ecology, Geology/minerals, Simulation/time, WASM/API, Web UI, CLI, Docs/CI]

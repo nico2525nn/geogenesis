@@ -1,0 +1,20 @@
+[package]
+name = "geogenesis-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "WebAssembly C-ABI bridge for the GeoGenesis engine."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+geogenesis-core.workspace = true
+
+[lints.rust]
+# This crate *is* the FFI boundary; every unsafe block is justified in the
+# module docs and confined to buffer marshalling.
+unsafe_code = "allow"
+unsafe_attr_outside_unsafe = "allow"
+missing_debug_implementations = "warn"

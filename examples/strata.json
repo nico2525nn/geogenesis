@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "layers": [
+    { "thickness_m": 120, "rock": "sandstone", "dip_deg": 3, "strike_deg": 45, "unconformity": false },
+    { "thickness_m": 60, "rock": "shale", "dip_deg": 3, "strike_deg": 45, "unconformity": false },
+    { "thickness_m": 250, "rock": "limestone", "dip_deg": 4, "strike_deg": 50, "fault_offset_m": -120 },
+    { "thickness_m": 40, "rock": "Salt", "dip_deg": 2, "strike_deg": 50 },
+    { "thickness_m": 300, "rock": "basalt", "dip_deg": 5, "strike_deg": 55, "unconformity": true },
+    { "thickness_m": 500, "rock": "granite", "dip_deg": 3, "strike_deg": 55 }
+  ]
+}

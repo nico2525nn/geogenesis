@@ -1,0 +1,33 @@
+name: Bug report
+description: Something behaves incorrectly (engine, CLI, WASM or UI)
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Expected vs actual behaviour. Add screenshots for terrain/UI issues.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: |
+        CLI: exact command, engine version, preset/seed/grid/parameters.
+        UI: preset, seed, grid, steps, browser/OS.
+      placeholder: |
+        geogenesis generate --preset earthlike --seed 42 --grid 384
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      placeholder: output of `geogenesis --version` or git commit
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / params.json / stats.json
+      description: Paste any relevant console output or attach exported files.
+      render: shell
